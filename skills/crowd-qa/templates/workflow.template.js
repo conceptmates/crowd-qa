@@ -200,7 +200,10 @@ const VERIFY_FILE_SCHEMA = { type: 'object', properties: { i: { type: 'number' }
 const PUSH_SCHEMA = { type: 'object', properties: { pushed: { type: 'boolean' }, map: { type: 'array', items: { type: 'object', properties: { i: { type: 'number' }, paths: { type: 'array', items: { type: 'string' } } }, required: ['i', 'paths'] } } }, required: ['pushed', 'map'] }
 const FILE_PARALLEL = A.file_parallel || 6
 const filed = [], notFiled = []
-const numbered = issues.map((x, k) => ({ ...x, i: k + 1 }))
+// a finding whose repo has no tracker goes to the first tracker instead of being dropped
+const trackerKeys = Object.keys(T).filter(k => T[k])
+const numbered = issues.map((x, k) => ({ ...x, i: k + 1, repo: T[x.repo || 'app'] ? (x.repo || 'app') : trackerKeys[0] }))
+if (!trackerKeys.length) for (const x of numbered) notFiled.push({ i: x.i, reason: 'no tracker configured' })
 const footer = `Found in the ${A.date} crowd run: ${CH.length} simulated users over ${DAYS} day(s). Tested by ${A.tester_label || 'the configured tester'}; evidence and source re-checked before filing.`
 const verifyFilePrompt = (x, repo, hook) => `You verify one crowd-QA bug and file it only if it holds up. Run dir: ${RUN}. Source: ${SRC}.
 Bug ${x.i}: ${JSON.stringify(x)}
@@ -214,8 +217,8 @@ Bug ${x.i}: ${JSON.stringify(x)}
 6. Append one line "#<number or id> <title>" to ${RUN}/filed.txt with a single echo >> (other verifiers append at the same time).
 Plain, specific prose: no hype words, no summary at the end. Report only URLs the tool returned.`
 
-for (const key of Object.keys(T)) {
-  const repo = T[key]; const mine = numbered.filter(x => (x.repo || 'app') === key)
+for (const key of trackerKeys) {
+  const repo = T[key]; const mine = numbered.filter(x => x.repo === key)
   if (!repo || !mine.length) continue
   let paths = new Map()
   if (!HOOK) {
