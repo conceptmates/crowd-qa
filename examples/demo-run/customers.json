@@ -1,0 +1,11 @@
+{
+  "channels": {
+    "chat": {
+      "url": "http://localhost:4100/webhook/{to}",
+      "method": "POST",
+      "headers": { "content-type": "application/json" },
+      "signing": { "type": "hmac-sha256", "header": "X-Signature", "prefix": "sha256=", "secret": "{secret}" },
+      "body": { "from": "{from}", "name": "{name}", "text": "{text}", "ts": "{ts_ms}" }
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "_comment": "Channels for scripts/customer.py. Point CUSTOMERS_CONFIG in config.env at a copy of this file. Placeholders: {to} {secret} from the business's registration; {from} {name} {text} from the command line; {ts} unix seconds, {ts_ms} milliseconds, {id} a unique event id; any --var key=value.",
+  "channels": {
+    "chat": {
+      "url": "http://localhost:4100/webhook/{to}",
+      "method": "POST",
+      "headers": { "content-type": "application/json" },
+      "signing": { "type": "hmac-sha256", "header": "X-Signature", "prefix": "sha256=", "secret": "{secret}" },
+      "body": { "from": "{from}", "name": "{name}", "text": "{text}", "ts": "{ts_ms}" }
+    },
+    "form": {
+      "url": "http://localhost:4100/hooks/form",
+      "method": "POST",
+      "headers": { "content-type": "application/json", "x-api-key": "{secret}" },
+      "body": { "event_id": "{id}", "account": "{to}", "email": "{from}", "message": "{text}", "submitted_at": "{ts}" }
+    }
+  }
+}
