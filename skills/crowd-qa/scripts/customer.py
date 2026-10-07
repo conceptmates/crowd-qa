@@ -11,7 +11,8 @@ Channels are declared in the JSON file named by CUSTOMERS_CONFIG in config.env (
       "body": {"from": "{from}", "name": "{name}", "text": "{text}", "ts": "{ts_ms}"}}}}
 
 Placeholders: {to} {secret} (from the business's registration), {from} {name} {text} (from the command line),
-{ts} unix seconds, {ts_ms} milliseconds, {id} a unique event id, and any --var key=value.
+{ts} unix seconds, {ts_ms} milliseconds, {id} a unique event id, and any --var key=value. A value that is exactly
+one placeholder keeps its type, so "{ts_ms}" sends a number; inside a longer string it is text.
 
   customer.py <run> register <business> --channel chat --to 4584072633 --secret abc [--var key=value]
   customer.py <run> list
@@ -43,6 +44,10 @@ def env(run, key):
 
 def fill(value, vals):
     if isinstance(value, str):
+        # a value that is exactly one placeholder keeps the placeholder's type ("{ts_ms}" -> a number)
+        m = re.fullmatch(r"\{(\w+)\}", value)
+        if m and m.group(1) in vals:
+            return vals[m.group(1)]
         out = value
         for k, v in vals.items():
             out = out.replace("{" + k + "}", str(v))
