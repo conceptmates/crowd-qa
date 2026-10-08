@@ -102,10 +102,11 @@ esac
   sed -e "s|\$SESSION|$SESSION|g" -e "s|\$OUT|$OUT|g" -e "s|\$RUN|$RUN|g" -e "s|\$LANE|$LANE|g" \
       -e "s|\$NAME|$NAME|g" -e "s|\$SURFACE|$SURFACE|g" -e "s|\$DEVICE|$DEVICE|g" -e "s|\$APP_ID|${APP_ID:-}|g" \
       -e "s|\$APP_URL|${APP_URL:-}|g" -e "s|\$ROUND|$ROUND|g" "$RUN/templates/tester-brief-character.md"
+  # what every character shares comes first (brief, context, product map) so tester engines can cache it
+  [ -f "$RUN/context.md" ] && { echo; cat "$RUN/context.md"; }
   echo; echo "## Who you are"; cat "$LD/card.md"
   echo; echo "## Your memory (what you did and felt on earlier days)"
   if [ -s "$LD/memory.md" ]; then cat "$LD/memory.md"; else echo "(day 1: you have never used this product)"; fi
-  [ -f "$RUN/context.md" ] && { echo; cat "$RUN/context.md"; }
   echo; echo "## The world right now (what other characters have made)"; python3 "$RUN/scripts/world.py" "$RUN" list
   echo; echo "## The town square (newest first)"; python3 "$RUN/scripts/square.py" "$RUN" digest "$LANE"
   echo; echo "## Day $ROUND scenarios"; cat "$LD/scenarios.md"
@@ -123,6 +124,8 @@ esac
 cd "$OUT"
 export AGENT_DEVICE_SESSION="$SESSION" AGENT_BROWSER_SESSION="$SESSION"
 MSG="You were interrupted (an engine or account switch, a quota pause, or a restart). You are still $NAME. Continue where you stopped: keep updating $OUT/report.json and your memory, finish every not_run scenario and the sweep, then give the 2-line summary."
+# resuming a session that another engine continued after it: the session's memory is stale, the files are not
+MSG_HANDOFF="You were interrupted and another tester continued your day in the meantime. You are still $NAME. $OUT/report.json is the current truth (it may have moved past where you remember): read it first, keep every result and evidence path in it, then continue with each not_run scenario and the sweep, keep updating report.json and your memory, and give the 2-line summary."
 limit_hit() { tail -c 4000 "$1" 2>/dev/null | grep -qiE "hit your usage limit|usage limit reached|hit your limit|rate limit exceeded|out of extra usage|quota exceeded"; }
 # markers older than RETRY_PRIMARY_MIN expire, so the primary engine gets another try after a limit
 expire_marker() { [ -f "$1" ] && [ $(( $(date +%s) - $(mtime "$1") )) -ge $(( ${RETRY_PRIMARY_MIN:-60} * 60 )) ] && rm -f "$1"; }
@@ -132,27 +135,31 @@ run_engine() {
   local E="$1" M="$2" F="$3" LOG="$4" SID
   case "$E" in
     codex)
-      SID=$(grep -h -m1 '^session id:' "$OUT"/tester*.log 2>/dev/null | tail -1 | awk '{print $3}')
-      if [ -n "$RESUME" ] && [ -n "$SID" ] && [ "$PREV_ENGINE" = codex ]; then
+      # the newest codex session of this day, even if another engine ran in between: resume beats a fresh start
+      SID=$(grep -h -m1 '^session id:' $(ls -t "$OUT"/tester*.log 2>/dev/null) 2>/dev/null | head -1 | awk '{print $3}')
+      if [ -n "$RESUME" ] && [ -n "$SID" ]; then
+        [ "$PREV_ENGINE" = codex ] && R_MSG="$MSG" || R_MSG="$MSG_HANDOFF"
         timeout "$ROUND_TIMEOUT_S" codex exec resume "$SID" --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
-          ${M:+-m "$M"} ${F:+-c model_reasoning_effort="$F"} "$MSG" > "$LOG" 2>&1
+          ${M:+-m "$M"} ${F:+-c model_reasoning_effort="$F"} "$R_MSG" > "$LOG" 2>&1
       else
         timeout "$ROUND_TIMEOUT_S" codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
           ${M:+-m "$M"} ${F:+-c model_reasoning_effort="$F"} < "$OUT/prompt.md" > "$LOG" 2>&1
       fi ;;
     claude)
       SID=$(cat "$OUT/claude-session" 2>/dev/null)
-      if [ -n "$RESUME" ] && [ -n "$SID" ] && [ "$PREV_ENGINE" = claude ]; then
+      if [ -n "$RESUME" ] && [ -n "$SID" ]; then
+        [ "$PREV_ENGINE" = claude ] && R_MSG="$MSG" || R_MSG="$MSG_HANDOFF"
         timeout "$ROUND_TIMEOUT_S" claude -p --resume "$SID" ${M:+--model "$M"} ${F:+--effort "$F"} \
-          --dangerously-skip-permissions "$MSG" < /dev/null > "$LOG" 2>&1
+          --dangerously-skip-permissions "$R_MSG" < /dev/null > "$LOG" 2>&1
       else
         SID=$(uuidgen | tr 'A-Z' 'a-z'); echo "$SID" > "$OUT/claude-session"
         timeout "$ROUND_TIMEOUT_S" claude -p --session-id "$SID" ${M:+--model "$M"} ${F:+--effort "$F"} \
           --dangerously-skip-permissions < "$OUT/prompt.md" > "$LOG" 2>&1
       fi ;;
     opencode)
-      if [ -n "$RESUME" ] && [ "$PREV_ENGINE" = opencode ] && [ -s "$OUT/opencode-session" ]; then
-        timeout "$ROUND_TIMEOUT_S" opencode run --auto -s "$(cat "$OUT/opencode-session")" ${M:+-m "$M"} "$MSG" > "$LOG" 2>&1
+      if [ -n "$RESUME" ] && [ -s "$OUT/opencode-session" ]; then
+        [ "$PREV_ENGINE" = opencode ] && R_MSG="$MSG" || R_MSG="$MSG_HANDOFF"
+        timeout "$ROUND_TIMEOUT_S" opencode run --auto -s "$(cat "$OUT/opencode-session")" ${M:+-m "$M"} "$R_MSG" > "$LOG" 2>&1
       else
         timeout "$ROUND_TIMEOUT_S" opencode run --auto --title "crowd-$LANE-d$ROUND" ${M:+-m "$M"} -f "$OUT/prompt.md" \
           "Read the attached file: it is your full brief. Follow it exactly." > "$LOG" 2>&1
@@ -162,6 +169,14 @@ run_engine() {
   esac
 }
 
+has_session() {
+  case "$1" in
+    codex) grep -qh '^session id:' "$OUT"/tester*.log 2>/dev/null ;;
+    claude) [ -s "$OUT/claude-session" ] ;;
+    opencode) [ -s "$OUT/opencode-session" ] ;;
+    *) return 1 ;;
+  esac
+}
 TRIES=0
 while :; do
   TRIES=$((TRIES+1)); [ "$TRIES" -gt 30 ] && done_with "exit=1 rc=too-many-switches"
@@ -178,7 +193,8 @@ while :; do
   LOG="$OUT/tester.log"; [ "$N" -gt 0 ] && LOG="$OUT/tester.run$N.log"
   state "running" "{\"engine\": \"$ENGINE\", \"device\": \"$DEVICE\", \"surface\": \"$SURFACE\"}"
   echo "$(date) attempt $TRIES engine=$ENGINE prev=${PREV_ENGINE:-none} resume=${RESUME:-no}" >> "$OUT/resume.log"
-  if [ -n "$RESUME" ] && [ "$PREV_ENGINE" != "$ENGINE" ]; then
+  # a fresh session (no earlier session for this engine) needs the handoff note in its prompt
+  if [ -n "$RESUME" ] && [ "$PREV_ENGINE" != "$ENGINE" ] && ! has_session "$ENGINE"; then
     printf '\n## RESUME (%s)\nThis day was started by another tester and interrupted. Partial progress: %s/report.partial.json, evidence in %s/shots/ and %s/evidence/, your memory in memory.md. Copy the partial report to report.json, keep its valid results and evidence, continue with every not_run scenario.\n' "$(date +%H:%M)" "$OUT" "$OUT" "$OUT" >> "$OUT/prompt.md"
   fi
   run_engine "$ENGINE" "$MODEL" "$EFFORT" "$LOG"; RC=$?

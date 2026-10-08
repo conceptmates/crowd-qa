@@ -31,13 +31,21 @@ export const meta = {
 //   pool_device: 1,      // ios/android characters at once (pool_ios is the old name)
 //   redo: { maya: 1 },   // re-run these days even if a resumed workflow has them cached
 //   prior_findings_file: '/abs/run/state/prior_findings.json',  // findings verified before a fresh relaunch
+//   planned: ['maya'],   // characters whose scenarios.md already has every day: no planner starts for them
+//   product_map_ready: false,   // true when <run>/product-map.md exists and covers every surface
+//   planner_model: 'sonnet', judge_model: 'sonnet', planner_effort: 'medium', judge_effort: 'medium'   // '' = inherit the session model
 // }
 const A = args
 const RUN = A.run_dir
 const DAYS = A.days || 2
 const POOL = A.pool || 4
 const MAX_WAITS = A.max_quota_waits || 8
-const HOOK = A.file_cmd || ''   // FILE_CMD from config.env: file through another tracker instead of gh
+const HOOK = A.file_cmd || ''
+// Model tiers. Planners and judges default to Sonnet; the filing verifiers inherit the orchestrating model and
+// re-check every bug's evidence and source before it is filed, so each filed bug is checked twice.
+const PLANNER_MODEL = A.planner_model === undefined ? 'sonnet' : A.planner_model   // '' = inherit
+const JUDGE_MODEL = A.judge_model === undefined ? 'sonnet' : A.judge_model
+const PLANNED = new Set(A.planned || [])   // FILE_CMD from config.env: file through another tracker instead of gh
 const FILED = (A.filed || []).join('\n')
 const DONE = A.done || {}
 const SRC = (A.source_paths || []).join(', ')
@@ -72,7 +80,7 @@ const designPrompt = c => `You are the scenario designer for one character in a 
 If ${RUN}/lanes/${c.id}/scenarios.md exists and is non-empty, do nothing else: return its scenario count.
 Otherwise:
 1. Read ${RUN}/lanes/${c.id}/card.md: who they are, device, text size, workspace, role, relationships, wants per day.
-2. Read the source and docs for the screens this person would use (the project's CLAUDE.md or AGENTS.md, README, docs and the feature folders), so steps use real labels and routes, and note server-side rules that produce user-visible errors. Intended behaviour in CLAUDE.md is not a bug: never design a scenario that "expects" it to be different.
+2. Read ${RUN}/product-map.md (screens, labels, routes, commands, endpoints, roles and server rules, written once for every planner) and ${RUN}/context.md. Use their labels and routes in steps. Do not explore the source yourself: at most 3 targeted lookups (rg -n -m5, or sed -n on a range of 40 lines or less) for a label the map lacks, and keep every command's output short (append | head -c 4000). Intended behaviour is not a bug: never design a scenario that "expects" it to be different.
 3. ${A.research_notes ? 'Research notes: ' + A.research_notes : 'Research on the web how this kind of person uses this kind of app and what they get wrong.'}
 4. Write ${RUN}/lanes/${c.id}/scenarios.md following ${RUN}/templates/scenario-format.md, with one "## Day N" section per day (1..${DAYS}). Day 1 = their first contact with the app and what they want that day. Later days = coming back: what they made yesterday, what other characters did to them (messages, invites, shared records), and checking the square. At least 60% failure and edge paths, at least two failures per happy path, all in this person's habits (a slow typist mistypes, an impatient one double-submits, someone types in their own language). For the boundary tester, stay inside the product's own screens, commands and endpoints: other users' records through guessed links or ids, role limits, odd and oversized input, stale links; describe each check plainly, with no catalogue of attack strings. End with the exhaustive sweep for their part of the product.\nThe file must exist with every day's section before you return; if you cannot finish, write what you have and return the count you wrote.
 Do not open the product. Return the scenario count and failure share (0-1).`
@@ -98,7 +106,7 @@ const waitPrompt = (c, d) => `Every tester engine hit its usage limit, so charac
 
 const judgePrompt = (c, d, doneLine) => `You are the judge for character "${c.id}", day ${d} of ${DAYS}${redoTag(c, d)}. Runner finished with: ${doneLine}.
 If ${RUN}/lanes/${c.id}/round${d}/verdict.json exists, return its contents unchanged and stop.
-Inputs: card ${RUN}/lanes/${c.id}/card.md; plan scenarios.md; report round${d}/report.json (screenshot paths relative to the day dir); tester*.log; memory.md; the square (python3 ${RUN}/scripts/square.py ${RUN} digest ${c.id} --limit 200, and thread <id>); source ${SRC}; the repos' CLAUDE.md.
+Inputs: first run python3 ${RUN}/scripts/judge-pack.py ${RUN} ${c.id} ${d} and read the file it prints: the scenarios with status, every finding with its evidence (screenshots downscaled to 900 px), the related square posts and the end of the tester log. Read card.md and the day's section of scenarios.md. Open only evidence the pack lists. For a cause, read only the cited file:line (sed -n on a range of 40 lines or less); if nothing is cited, at most 3 targeted lookups (rg -n -m5). Keep every command's output short (append | head -c 4000). Source: ${SRC}.
 Be demanding:
 A. Coverage: this day's scenarios have a real status and a final-state screenshot, the failure paths were really tried in character, the sweep happened, and "blocked" is justified.
 B. Each finding: open its screenshots and confirm they show the claim; open the cited file and confirm the cause, else mechanism = "not confirmed". Reject findings without a screenshot, speculation, intended behaviour (anything Run context, CLAUDE.md or the specs document as intended), and duplicates of:
@@ -121,20 +129,28 @@ async function runDay(c, d) {
     if (!w || !w.resumed) { log(`${c.id} d${d}: not resuming (${w ? w.reason : 'waiter failed'})`); return null }
     waits++
   }
-  const v = await agent(judgePrompt(c, d, run.done_line), { label: `judge:${c.id}:d${d}`, phase: 'Judge', schema: VERDICT_SCHEMA, effort: 'high' })
+  const v = await agent(judgePrompt(c, d, run.done_line), { label: `judge:${c.id}:d${d}`, phase: 'Judge', schema: VERDICT_SCHEMA, ...(JUDGE_MODEL ? { model: JUDGE_MODEL } : {}), effort: A.judge_effort || 'medium' })
   if (v) log(`${c.id} d${d}: coverage ${v.coverage_score}, in-character ${v.in_character ?? '-'}, ${v.verified_findings.length} verified, satisfied=${v.satisfied}`)
   return v
 }
 
 // Design all characters first (cheap, parallel in small batches)
 phase('Design')
+// One agent maps the product once (screens, labels, routes, commands, endpoints, roles, server rules), so
+// planners do not each explore the source: that exploration was most of a run's planning tokens.
+if (!A.product_map_ready) {
+  await agent(`Write ${RUN}/product-map.md, the shared map every scenario planner of this crowd QA run reads instead of the source. Source: ${SRC}. Run dir: ${RUN} (context.md says what the product is and which surfaces the crowd uses).
+For each surface in use (web screens, mobile screens, CLI commands, API endpoints): the routes or commands, the visible labels of buttons, fields and tabs, what each role may do, plan or feature gates, limits and validation rules, the server-side refusals a user can hit and their wording, and anything scheduled or asynchronous. Cite file:line for rules. Group by area. Aim for completeness over prose: tables and lists. Keep every command's output short (append | head -c 4000).
+If the file already exists and covers every surface, return without changing it.`, { label: 'product-map', phase: 'Design', effort: 'high' })
+}
 // Plans are written 5 at a time, and each character's day 1 starts as soon as its own plan exists,
 // so testing does not wait for the slowest designer.
 let slots = 5; const slotq = []
 const acquire = () => slots > 0 ? (slots--, Promise.resolve()) : new Promise(r => slotq.push(r))
 const release = () => { const n = slotq.shift(); if (n) n(); else slots++ }
-const designP = new Map(CH.map(c => [c.id, acquire()
-  .then(() => agent(designPrompt(c), { label: `design:${c.id}`, phase: 'Design', schema: DESIGN_SCHEMA, effort: 'high' }))
+// characters whose plan already exists (args.planned, filled by the launcher or resume.sh) start no planner at all
+const designP = new Map(CH.map(c => [c.id, PLANNED.has(c.id) ? Promise.resolve({ scenario_count: 1, skipped: true }) : acquire()
+  .then(() => agent(designPrompt(c), { label: `design:${c.id}`, phase: 'Design', schema: DESIGN_SCHEMA, ...(PLANNER_MODEL ? { model: PLANNER_MODEL } : {}), effort: A.planner_effort || 'medium' }))
   .then(v => { release(); if (!v || !v.scenario_count) { log(`${c.id}: no plan written, character skipped`); return null } return v }, e => { release(); return null })]))
 const ready = CH
 // characters someone else depends_on (a shop owner, a host) always get their next day, so the people

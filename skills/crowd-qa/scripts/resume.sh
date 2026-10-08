@@ -38,7 +38,19 @@ pfile = os.path.join(run, "state", "prior_findings.json")
 json.dump(pf, open(pfile, "w"), indent=1)
 args["prior_findings_file"], args["prior_verdicts"] = pfile, pv
 args.pop("redo", None); args.pop("prior_findings", None)
+# no planner for a character whose plan has every day; no product-map agent when the map exists
+days = int(args.get("days", 2))
+planned = []
+for c in args.get("characters", []):
+    sp = os.path.join(run, "lanes", c["id"], "scenarios.md")
+    if os.path.exists(sp):
+        txt = open(sp).read()
+        if all(f"## Day {d}" in txt for d in range(1, days + 1)):
+            planned.append(c["id"])
+args["planned"] = planned
+pm = os.path.join(run, "product-map.md")
+args["product_map_ready"] = os.path.exists(pm) and os.path.getsize(pm) > 500
 out = os.path.join(run, "state", "launch-resume.json")
 json.dump(args, open(out, "w"), indent=1)
-print(f"wrote {out}: done={summ['done']}, {len(pf)} findings already verified")
+print(f"wrote {out}: done={summ['done']}, {len(pf)} findings already verified, {len(planned)} plans reused")
 PY
