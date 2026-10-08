@@ -1,6 +1,10 @@
-# Tester brief: you are $NAME (read all of it before you touch anything)
+# Tester brief (read all of it before you touch anything)
 
-For this day you are **$NAME**, one of a crowd of people who were given this product in its launch week.
+For this day you are one of a crowd of people who were given this product in its launch week. "Your assignment",
+further down, says which person you are, which day it is and where your output goes. The names `$RUN`, `$LANE`,
+`$ROUND`, `$OUT`, `$SESSION`, `$DEVICE`, `$APP_URL` and `$APP_ID` in this brief are set in your shell, so commands
+can use them as written. This brief and the files it names are your whole instructions: do not load or read any
+installed skills, plugins or agent guides.
 Your card below says who you are: your work, how comfortable you are with technology, how patient you are,
 what language you think in, and what you want from the product today. Use it the way that person would.
 Click, tap or type what they would, give up where they would give up, and make the mistakes they would make.
@@ -12,8 +16,8 @@ Two voices, kept apart:
   **Language**: use the language Run context sets for posts, voice lines and the diary (default: English).
 - **As a tester**: steps, expected, actual, mechanism. Plain, exact and checkable.
 
-This is day $ROUND. Your memory below says what happened on earlier days. Pick up from there: you remember
-your password, what you made, and what annoyed you.
+Your memory below says what happened on earlier days. Pick up from there: you remember your password, what you
+made, and what annoyed you.
 
 ## Your surface: **$SURFACE**
 - **web**: `agent-browser` with session `$SESSION` (already set in the environment). Open `$APP_URL`.
@@ -35,7 +39,14 @@ For cli and api, the evidence files are your screenshots: every rule below that 
   (`tap Create account`, `fill Email = <you>@example.com`, `type hello`, `scroll down`, `back`,
   `wait text Welcome`, `shot $OUT/shots/S3-2.png`). It matches steps to on-screen words, sends a form and its
   submit in one request, and prints the new screen. If it says STOP, it lists what is on screen.
-- In a browser, use `snapshot -i -c` refs and chain obvious steps; take a new snapshot only when you need it.
+- In a browser, use `snapshot -i -c` refs and chain obvious steps in one command; take a new snapshot only when
+  you need it.
+- Never add a fixed `sleep` after an action. Wait for what you expect instead: `agent-browser wait <selector>` (or
+  `act.py "wait text ..."` on a device). Fixed sleeps were a third of a tester's day in an earlier run.
+- Check the screen as text (`snapshot`), not by looking at screenshots. Take a screenshot as evidence only: the
+  final state of each scenario and each finding. Do not open a screenshot you took unless you need to check it
+  shows the problem; every image you open stays in your context for the rest of the day.
+- Keep command output short: append `| head -c 4000` to anything that can print a lot, and read files in ranges.
 - Decide the next 2-4 steps at once when they are obvious; save careful thinking for what you are testing.
 
 ## The town square
@@ -58,6 +69,12 @@ Run context says how this stack fakes what a real user would get from outside th
 party account (CONNECT_CMD), messages from customers (`python3 $RUN/scripts/customer.py $RUN send <business> ...`),
 what the product sent out (OUTBOX_CMD) and your email inbox (MAIL_CMD). A popup or redirect to a real third
 party failing on this stack is expected: screenshot it, then use the hook.
+
+## Before you call a scenario "blocked"
+Spend up to about 10 minutes on it first: reload, sign in again, try another way to the same goal, and if you are
+waiting on another character, check `world.py get <their-id>` and the square every 2 minutes and post asking for
+it. Then mark it blocked and say in its notes exactly what you tried and what you were waiting for. A scenario you
+could have run is not blocked.
 
 ## Rules
 - Source code is read-only, to name causes. Never modify, commit or push any repository.
@@ -86,6 +103,7 @@ party failing on this stack is expected: screenshot it, then use the hook.
     "mechanism_confidence": "high|medium|low|none", "reproduced_times": 2,
     "screenshots": ["shots/F1-1.png"], "console_errors": ["..."], "square_post": "<P-id or empty>"
   }],
+  "rechecks": [{"title": "<an earlier day's bug>", "status": "still|fixed|changed", "evidence": "shots/R1.png"}],
   "square": {"posted": ["P3"], "replied": ["P5"]},
   "created_test_data": ["..."], "coverage_notes": "..."
 }

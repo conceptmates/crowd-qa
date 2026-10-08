@@ -1,36 +1,40 @@
 # Token cost: where it goes and what keeps it down
 
-Measured on a 30-character, 2-day web run (Codex testers, Opus orchestrating), before the changes below.
-Codex tester usage is billed to Codex accounts and is not counted here.
+Measured on a 30-character, 2-day web run with an earlier version of this skill (agents for every step, Codex
+and Sonnet testers, Opus orchestrating): about $1,000 of Claude spend for 199 filed issues, plus most of a
+week of Codex quota.
 
-| Part | Agents | Avg turns | Share of subagent tokens | Why |
-|---|---|---|---|---|
-| Planners | 95 for 30 characters | 26 | 52% | each re-explored the source (about 26 shell calls, 77 KB of output); restarts re-ran them, about 3 runs per character, and none skipped an existing plan |
-| Judges | 112 | 18 | 40% | about 16 shell calls each to find reports, logs and square posts; 6 full-size screenshots each; Opus at high effort for every judge |
-| Day agents | 146 | 4 | 5% | start a runner, watch it, return |
-| Merge, filing, report, audits | ~20 | — | 3% | |
-
-The orchestrating session adds its own share: every turn re-reads the whole conversation, so a long chat that
-monitors a run for a night costs as much as a quarter of the subagents.
+| Part | Spend | Why |
+|---|---|---|
+| Planners (Opus) | $194 | each explored the source; restarts re-ran them |
+| Day judges (Opus, day 1) | $186 | 1,897 tool calls, 84% of them digging through raw logs |
+| Testers (Sonnet) | $166 | 23% Claude Code's own fixed context re-read every turn; contexts grew to 390K tokens |
+| Orchestrating session | $162 | 619 turns at about 490K tokens of context each |
+| Bug checks before filing (Opus) | $161 | every bug re-checked on Opus; 3.9% refused |
+| Agents that only waited on testers | $106 | an agent per character-day, polling |
+| Bought nothing | $156 | redone days, agents re-started on resume, agents killed before they returned |
 
 ## What the skill does about it
 
-| Change | Where | Expected effect |
+| Change | Where | Effect (est.) |
 |---|---|---|
-| One product map, written once; planners read it instead of the source, with at most 3 lookups | `templates/workflow.template.js` (Design phase) | planning about -90% together with the next two |
-| Planners skipped in code for characters whose plan exists (`args.planned`, filled by `resume.sh`) | template, `scripts/resume.sh` | no duplicate planners after a restart |
-| Planners on Sonnet at medium effort (`planner_model`, `planner_effort`) | template | plans are structured writing from the map |
-| A judge pack per character-day: scenarios, findings with 900 px screenshots, related square posts, the log tail | `scripts/judge-pack.py`, template | judging about -55% |
-| Judges on Sonnet at medium effort (`judge_model`, `judge_effort`); only cited lines of code | template | every filed bug is still re-checked on the orchestrating model before filing |
-| Shell output capped in agent prompts (`| head -c 4000`, narrow `sed -n` ranges) | template | smaller contexts on every later turn |
-| Shared prompt parts first (brief, context) in the tester prompt | `scripts/run-tester.sh` | better cache reuse across characters |
-| Testers resume the newest session of their engine after a restart or a fallback | `scripts/run-tester.sh` | no fresh session re-reading the whole brief |
+| Waiting, scheduling, quota pauses and resuming are code, not agents | `scripts/crowd.py` | the $106 of waiting agents and the $77 of re-started agents go away |
+| Coverage, missing evidence, duplicates of filed issues and of a character's earlier days are checked in code before any judge runs; a day with nothing left to check calls no model | `crowd.py` (`precheck`, `coverage`) | judges see fewer findings; quiet days are free |
+| One judge pack per day; judges on Sonnet, reading only cited lines | `judge-pack.py`, `crowd.py` | judging about -55% (day 2 of the measured run: $2.85 to $0.35 per judge) |
+| Bug checks on Sonnet; Opus only for high severity or an unconfirmed cause; a wrong screenshot is repaired, not refused | `crowd.py` (`verify`) | about -$85; real bugs no longer lost to a mislabelled screenshot |
+| Merging, labels, issue bodies, evidence push and filing are code; a model is asked only about look-alike pairs on the same screen | `crowd.py` (`dedupe`, `file_issues`) | one small call instead of a merge agent and a push agent per repo |
+| One product map; planners read it, on Sonnet, with at most 3 source lookups | `crowd.py` (`plan`) | planning about -90% |
+| Claude testers start lean: no user settings, hooks, plugins, MCP servers or skills | `run-tester.sh` (`CLAUDE_LEAN`) | first-turn context 37K to 19K tokens, measured |
+| Claude testers run in chunks of `CHUNK_USD`; a spent chunk continues in a fresh session from report.json | `run-tester.sh` | late turns stop re-reading 300K+ tokens |
+| The tester prompt holds only today's scenarios, 20 square posts, and starts with the parts every character shares, so it caches across the crowd | `run-tester.sh` | prompt about -24%; a real shared prefix |
+| Day 2 re-checks day 1's bugs instead of reporting them again | `run-tester.sh`, tester brief | fewer repeats to judge and merge |
+| Testers wait for elements, not fixed sleeps; check screens as text; open screenshots only to check evidence | tester brief | a third of tester time was fixed sleeps; carried images were 10% of tester tokens |
+| A runner probes the stack itself before starting; per-engine quota pauses | `run-tester.sh`, `api-watch.sh once` | no character-days against a dead server; one engine's quota never stops the others |
 
-Estimate for a run of the same size: about 70% fewer orchestrator tokens, and a larger cut in plan-limit use
-because planners and judges moved off the top model.
+Every model step's cost lands in `state/costs.jsonl`; `crowd.py <run> status` adds it up.
 
 ## Habits that matter as much as the code
-- Change capacity in `config.env` (read at every start), not by restarting the workflow mid-day. Each restart
-  re-runs whatever agents were in flight.
-- Monitor from a fresh, short session: `bash <run>/scripts/resume.sh <run>` and `status.py` give the whole picture.
-- Keep plans to 15-20 scenarios per character-day; judges cost grows with every scenario they check.
+- Run `crowd.py` detached and check on it with `crowd.py <run> status` from a short session, not a long chat
+  that re-reads its whole history on every turn.
+- Change capacity in `config.env`; runners read it at every start. Nothing needs a restart.
+- Keep plans to `SCEN_MAX` (default 20) scenarios per character per day.

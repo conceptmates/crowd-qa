@@ -9,9 +9,10 @@
 #               env flags that read "1" as false and missing keys only show up here
 #   devices   — mobile only: agent-device installed globally (npx costs 1.4 s per call), devices present,
 #               the iOS device runner prepared once per simulator
-#   tester    — the tester CLI (and the fallback's) answers
+#   engines   — the user chose the tester engines (ENGINE_CONFIRMED=yes, references/engines.md); every CLI they
+#               name answers, and so does LLM_CLI, which crowd.py uses to plan, judge, verify and report
 #   watchers  — api-watch and the state saver are running, so an outage holds the crowd and state is on disk
-#   leftovers — no runner from an earlier workflow may still hold a device
+#   leftovers — runners still alive from an earlier crowd.py are reported (crowd.py waits for them)
 set -u
 RUN="$1"; . "$RUN/config.env"
 fail=0
@@ -55,8 +56,16 @@ case "$surfaces" in *android*) command -v adb >/dev/null && [ -n "$(adb devices 
 case "$surfaces" in *cli*) [ -n "${CLI_CMD:-}" ] && ok "CLI_CMD set" || bad "CLI_CMD empty (cli characters need it)";; esac
 case "$surfaces" in *api*) [ -n "${API_URL:-}" ] && curl -s -o /dev/null -m 5 "$API_URL" && ok "API_URL answers" || bad "API_URL empty or not answering";; esac
 
-for t in "${TESTER:-codex}" ${FALLBACK_TESTER:-}; do
-  command -v "$t" >/dev/null && ok "tester CLI: $t $($t --version 2>&1 | head -1)" || bad "tester CLI $t missing"
+if [ "${ENGINE_CONFIRMED:-}" = yes ]; then
+  ok "engines chosen: TESTER=${TESTER:-?} ${TESTER_MODEL:-} ${TESTER_EFFORT:-}${FALLBACK_TESTER:+, fallback $FALLBACK_TESTER}"
+else
+  bad "tester engines not chosen yet. Ask the user before launch; references/engines.md has the question and the"
+  sed -n '/^## The question/,/^## /p' "$(dirname "$0")/../references/engines.md" 2>/dev/null | sed '$d' | sed 's/^/      /'
+  echo "      Then set TESTER, TESTER_MODEL, TESTER_EFFORT (and CODEX_MODEL/CODEX_EFFORT, any '- **Engine**:' card lines) and ENGINE_CONFIRMED=yes in config.env."
+fi
+engines=$( { echo "${TESTER:-claude}" "${FALLBACK_TESTER:-}" "${LLM_CLI:-claude}"; sed -n 's/^- \*\*Engine\*\*: *//p' "$RUN"/lanes/*/card.md 2>/dev/null; } | tr ' ' '\n' | awk 'NF{print tolower($1)}' | sort -u)
+for t in $engines; do
+  command -v "$t" >/dev/null && ok "engine CLI: $t $($t --version 2>&1 | head -1)" || bad "engine CLI $t missing"
 done
 pgrep -f "state-saver.sh $RUN" >/dev/null && ok "state saver running" || bad "state saver not running: bash $RUN/scripts/restart-watchers.sh $RUN"
 if [ -n "${HEALTH_CHECKS:-}" ]; then
@@ -65,6 +74,7 @@ if [ -n "${HEALTH_CHECKS:-}" ]; then
 else bad "HEALTH_CHECKS is empty: without api-watch an outage burns character-days (references/hooks.md)"; fi
 
 left=$(pgrep -f "run-tester.sh $RUN " | wc -l | tr -d ' ')
-[ "$left" = 0 ] && ok "no leftover runners" || bad "$left runner(s) from an earlier workflow still alive: stop them (and release .devices/) before relaunching"
+[ "$left" = 0 ] && ok "no runners alive" || ok "$left runner(s) still alive from an earlier start: crowd.py waits for them instead of starting a second copy"
+[ -f "$RUN/lanes.json" ] && ok "lanes.json: $(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))))" "$RUN/lanes.json") characters" || bad "lanes.json missing: [{\"id\", \"role\", \"surface\", \"depends_on\": []}, ...]"
 
 exit $fail

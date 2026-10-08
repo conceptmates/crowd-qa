@@ -22,9 +22,9 @@ new machine.
 | A log stream left running | It took a whole CPU core | Testers read logs once per flow |
 | Maximum reasoning effort spent on every single tap | Slow days | `act.py` batches plain-word steps with no model call per tap |
 | Testing waited for every scenario plan | Idle devices while the last plans were written | A character's day 1 starts as soon as its own plan exists |
-| Restarting the workflow to add capacity | Unfinished plans were rewritten each time | Set capacity in config.env (read at every start) and avoid restarts mid-day |
+| Restarting the orchestration to add capacity | Unfinished plans were rewritten each time | Capacity lives in config.env (read at every start); crowd.py never needs a restart |
 | Dependents waited behind every provider on one device | A serial run | Browser, CLI and API lanes beside the device lane; providers first |
-| The workflow ended but runners kept going | Orphans held devices; stale state | `preflight.sh` refuses to launch over leftover runners |
+| The orchestration ended but runners kept going | Orphans held devices; stale state | crowd.py attaches to live runners after a restart and never starts a second copy |
 | A fresh relaunch over old round dirs | Judges return an existing `verdict.json` unchanged | Archive `lanes/*/round*` before a fresh relaunch, or use `redo` tags when resuming |
 | The tester account was shared with the user's own work | It ran out before the crowd used much | A fallback engine (FALLBACK_TESTER) takes over at the limit; the primary is retried later |
 | A tester opened extra browsers for a second user | Load on the orchestrating machine went from 7 to 35 | The brief names one extra session per character (`<session>-2`) and nothing else |
@@ -32,3 +32,12 @@ new machine.
 | Judges hunted for reports, logs and posts with shell commands | Most of every judge's turns | `judge-pack.py` puts each day's inputs in one file |
 | A tester restarted after a fallback started a fresh session | It re-read the whole brief and lost its context | The runner resumes the newest session of that engine |
 | `pkill -f <name>` over SSH | Killed the SSH session itself | Kill by pid file |
+| A reboot took the stack down; the health watcher was not running afterwards | 10 more testers started against a dead server; 17 character-days redone | Each runner probes the stack itself (`api-watch.sh once`) before starting; `NOTIFY_CMD` tells a person |
+| The laptop running the testers admitted 20 by free memory alone | Load 940, 14 GB of swap, dead for four hours | `capacity.sh` also refuses while swap in use exceeds `SWAP_MAX_MB` |
+| An agent per character-day only waited for its tester | $106 of a $1,000 run; $77 more re-starting them on resume | `crowd.py` waits in code |
+| The tester brief said "carry forward" yesterday's results | 61% of day-2 findings repeated the same character's day 1 | Day 2 gets yesterday's verified bugs as a re-check list; repeats are rejected in code |
+| A character judged "satisfied" on day 1 was skipped on day 2 | 46 planned scenarios never ran | Every character gets every day |
+| One engine's usage limit paused the whole crowd | Characters on other engines waited too | Quota pauses are per engine (`QUOTA_PAUSE.<engine>`) |
+| Every bug re-checked on the top model before filing | 3.9% refused; three real bugs refused only for a mislabelled screenshot | Sonnet checks, the top model only for high severity or unconfirmed causes; wrong screenshots are repaired |
+| Customers waited for the business owner's day to be judged | 8 of 17 businesses never got a customer | Dependents wait for the provider's run, not its judge; days do not wait for each other |
+| Testers slept a fixed time after every action | A third of tester wall time | The brief asks for waits on elements |

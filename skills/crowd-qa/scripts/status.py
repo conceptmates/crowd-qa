@@ -41,6 +41,7 @@ for lane_dir in sorted(glob.glob(f"{run}/lanes/*/")):
 print()
 if os.path.exists(f"{run}/TESTER_FALLBACK"): print("FALLBACK: ", open(f"{run}/TESTER_FALLBACK").read().strip())
 if os.path.exists(f"{run}/STACK_DOWN"): print("STACK DOWN:", open(f"{run}/STACK_DOWN").read().strip())
-if os.path.exists(f"{run}/QUOTA_PAUSE"): print("PAUSED:   ", open(f"{run}/QUOTA_PAUSE").read().strip())
+for qp in sorted(glob.glob(f"{run}/QUOTA_PAUSE.*")):
+    if "lifted" not in qp: print("PAUSED:   ", os.path.basename(qp), open(qp).read().strip())
 print("capacity: ", *(tail(f"{run}/capacity.log") or ["-"]))
 print("memory:   ", *(tail(f"{run}/memlog.txt") or ["(memlog not running?)"]))

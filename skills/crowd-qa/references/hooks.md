@@ -20,7 +20,7 @@ Write any helper outside the product's checkout and never edit it.
 
 | Hook | Called by | Contract |
 |---|---|---|
-| `HEALTH_CHECKS` | `api-watch.sh` (every 60 s), `watchdog.sh` | `"name|command; name|command"`. Each command exits 0 when healthy. Include the API's health endpoint, the app's page, any fake upstream, storage, and **a canary sign-in** (create `canary@crowd.test` before launch): a wiped database still answers health checks, but it fails the canary. |
+| `HEALTH_CHECKS` | `api-watch.sh` (every 60 s), `watchdog.sh`, and `run-tester.sh` before each start (`api-watch.sh <run> once`) | `"name|command; name|command"`. Each command exits 0 when healthy. Include the API's health endpoint, the app's page, any fake upstream, storage, and **a canary sign-in** (create `canary@crowd.test` before launch): a wiped database still answers health checks, but it fails the canary. |
 | `STACK_UP_CMD` | `watchdog.sh` | Idempotent: brings the stack up and returns when it should answer. |
 | `DB_COUNT_CMD` | `watchdog.sh` | Prints one number that only grows during a run (users, rows). A drop means the data was wiped. |
 | `DB_BACKUP_CMD` | `watchdog.sh` | Prints a complete dump to stdout (e.g. `docker exec db pg_dump -U app app --clean --if-exists`). |
@@ -52,4 +52,5 @@ the orchestrating machine, or the run dir's `watchdog.sh` and hooks can be copie
 
 | Hook | Called by | Contract |
 |---|---|---|
-| `FILE_CMD` | the filing verifiers | Empty: GitHub through `gh`, evidence on an orphan branch. Set: `<FILE_CMD> <issue.json>` files one issue in another tracker (Linear, Jira, a board) and prints its URL or id. The JSON has `title`, `body` (markdown), `labels`, `repo` (the trackers key), `screenshots` (absolute paths). |
+| `NOTIFY_CMD` | `api-watch.sh` | Optional. Runs with one argument, the message, when the stack goes down and when it comes back: a desktop notification, a chat webhook, a file the orchestrating session watches. |
+| `FILE_CMD` | `crowd.py file`, after the bug check | Empty: GitHub through `gh`, evidence on an orphan branch. Set: `<FILE_CMD> <issue.json>` files one issue in another tracker (Linear, Jira, a board) and prints its URL or id. The JSON has `title`, `body` (markdown), `labels`, `repo` (the trackers key), `screenshots` (absolute paths). |

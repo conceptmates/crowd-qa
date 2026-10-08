@@ -11,11 +11,16 @@
 #   cli      the product's command-line tool, run in round<day>/work/
 #   api      the product's HTTP API (curl), requests and responses logged in round<day>/evidence/
 #
-# Engines (config.env): TESTER = codex | claude | opencode, chosen in preflight. When a tester hits its usage
-# limit and FALLBACK_TESTER is set, the runner writes TESTER_FALLBACK and every new attempt uses the fallback;
-# the primary is tried again RETRY_PRIMARY_MIN minutes later. When the fallback runs out too, the runner writes
-# QUOTA_PAUSE and stops the day; the workflow waits RETRY_PRIMARY_MIN and resumes it. A switch resumes the same
-# session when it can, otherwise starts a fresh one carrying report.partial.json.
+# Engines (config.env): TESTER = codex | claude | opencode, chosen in preflight (references/engines.md). A card
+# field "Engine" gives one character its own engine; that engine's model and effort come from CODEX_MODEL /
+# CLAUDE_MODEL / OPENCODE_MODEL and the matching *_EFFORT (TESTER_MODEL / TESTER_EFFORT when it is TESTER).
+# Claude testers start lean (CLAUDE_LEAN=1: no user settings, hooks, plugins, MCP servers or skills, about half
+# the fixed context) and run in chunks of CHUNK_USD dollars: when a chunk is spent, a fresh session continues from
+# report.json, so the context never grows to hundreds of thousands of tokens re-read on every turn.
+# When an engine hits its usage limit and FALLBACK_TESTER is set, the runner writes TESTER_FALLBACK (naming the
+# engine that ran out) and that engine's characters continue on the fallback, from report.json. Without a
+# fallback, or when the fallback runs out too, it writes QUOTA_PAUSE.<engine> and stops the day: only characters
+# on that engine wait; crowd.py lifts the pause after RETRY_PRIMARY_MIN minutes and starts the day again.
 set -u
 if [ -z "${RUNNER_FROZEN:-}" ]; then
   # freeze a copy per character-day so editing the script mid-run never changes a running day
@@ -29,7 +34,7 @@ mkdir -p "$OUT/shots" "$OUT/evidence"; rm -f "$OUT/DONE"
 SESSION="crowd-$LANE"
 card_field() { sed -n "s/^- \*\*$1\*\*: *//p" "$LD/card.md" | head -1; }
 NAME=$(card_field Name); SURFACE=$(card_field Surface); SURFACE=${SURFACE:-$TARGET}
-EXCLUSIVE=$(card_field Exclusive)
+EXCLUSIVE=$(card_field Exclusive); CARD_ENGINE=$(card_field Engine | awk '{print tolower($1)}')
 mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
 free_gb() { df -Pk "$RUN" | awk 'NR==2{print int($4/1048576)}'; }
 
@@ -58,8 +63,6 @@ done_with() {
 }
 trap cleanup EXIT
 
-# QUOTA_PAUSE exists only when every engine is out (all tester accounts AND the fallback)
-[ -f "$RUN/QUOTA_PAUSE" ] && done_with "exit=quota rc=paused-before-start"
 
 # An exclusive character (one who stalls the shared API to fake a weak network) runs alone: everyone else
 # waits while it holds .exclusive, and it waits for the others to finish first. This costs the whole crowd
@@ -85,8 +88,12 @@ case "$SURFACE" in ios|android)
   DEVICE=$(bash "$RUN/scripts/device-pool.sh" "$RUN" acquire "$LANE" "$ROUND" $$ | tail -1)
   [ -z "$DEVICE" ] && done_with "exit=1 rc=no-device" ;;
 esac
-# never start on a broken stack: api-watch.sh writes STACK_DOWN and the watchdog repairs it
-while [ -f "$RUN/STACK_DOWN" ]; do state "waiting-stack"; sleep 30; done
+# never start on a broken stack: api-watch.sh writes STACK_DOWN and the watchdog repairs it. The runner also
+# probes the stack itself, so a dead server holds the crowd even when the watcher is not running.
+stack_ok() { [ ! -f "$RUN/STACK_DOWN" ] && { [ -z "${HEALTH_CHECKS:-}" ] || bash "$RUN/scripts/api-watch.sh" "$RUN" once >/dev/null 2>&1; }; }
+until stack_ok; do
+  state "waiting-stack"; echo "$(date +%H:%M:%S) [$LANE] WAIT stack: $(bash "$RUN/scripts/api-watch.sh" "$RUN" once 2>&1 | tail -1)" >> "$RUN/capacity.log"; sleep "${STACK_POLL_S:-60}"
+done
 mkdir -p "$RUN/.active"; touch "$RUN/.active/$LANE"
 state "running" "{\"device\": \"$DEVICE\", \"surface\": \"$SURFACE\"}"
 
@@ -98,27 +105,47 @@ case "$SURFACE" in
   *) TOOL_NOTE="" ;;
 esac
 
+# The values testers use in commands are exported, so the brief stays identical for every character and the
+# shared part of the prompt (brief, then context) is a real cache prefix across the crowd.
+export RUN LANE ROUND OUT NAME SURFACE SESSION DEVICE APP_URL="${APP_URL:-}" APP_ID="${APP_ID:-}"
+PREV=$((ROUND-1))
+day_section() {  # only today's scenarios plus the sweep; the other days' plans are dead weight in the prompt
+  awk -v d="$ROUND" '
+    /^## / { keep = ($0 ~ "^## Day " d "([^0-9]|$)") || tolower($0) ~ /sweep/ }
+    keep' "$LD/scenarios.md"
+}
 {
-  sed -e "s|\$SESSION|$SESSION|g" -e "s|\$OUT|$OUT|g" -e "s|\$RUN|$RUN|g" -e "s|\$LANE|$LANE|g" \
-      -e "s|\$NAME|$NAME|g" -e "s|\$SURFACE|$SURFACE|g" -e "s|\$DEVICE|$DEVICE|g" -e "s|\$APP_ID|${APP_ID:-}|g" \
-      -e "s|\$APP_URL|${APP_URL:-}|g" -e "s|\$ROUND|$ROUND|g" "$RUN/templates/tester-brief-character.md"
-  # what every character shares comes first (brief, context, product map) so tester engines can cache it
+  cat "$RUN/templates/tester-brief-character.md"
   [ -f "$RUN/context.md" ] && { echo; cat "$RUN/context.md"; }
+  # everything below differs per character
+  echo; echo "## Your assignment"
+  echo "You are $NAME (character id $LANE), day $ROUND, surface $SURFACE. These are set in your shell environment:"
+  echo "RUN=$RUN  LANE=$LANE  ROUND=$ROUND  OUT=$OUT  SESSION=$SESSION${DEVICE:+  DEVICE=$DEVICE}${APP_URL:+  APP_URL=$APP_URL}${APP_ID:+  APP_ID=$APP_ID}"
+  echo "File tools need absolute paths: use the values above, not the variable names."
   echo; echo "## Who you are"; cat "$LD/card.md"
   echo; echo "## Your memory (what you did and felt on earlier days)"
   if [ -s "$LD/memory.md" ]; then cat "$LD/memory.md"; else echo "(day 1: you have never used this product)"; fi
+  if [ -s "$RUN/stack-faults.md" ]; then
+    echo; echo "## Known test-setup problems (not product bugs: work around them, never report them)"; tail -40 "$RUN/stack-faults.md"
+  fi
   echo; echo "## The world right now (what other characters have made)"; python3 "$RUN/scripts/world.py" "$RUN" list
-  echo; echo "## The town square (newest first)"; python3 "$RUN/scripts/square.py" "$RUN" digest "$LANE"
-  echo; echo "## Day $ROUND scenarios"; cat "$LD/scenarios.md"
-  PREV=$((ROUND-1))
+  echo; echo "## The town square (newest ${SQUARE_DIGEST_LIMIT:-20}; older: python3 \$RUN/scripts/square.py \$RUN digest \$LANE --limit 80)"
+  python3 "$RUN/scripts/square.py" "$RUN" digest "$LANE" --limit "${SQUARE_DIGEST_LIMIT:-20}"
+  echo; echo "## Day $ROUND scenarios"
+  if grep -q "^## Day $ROUND" "$LD/scenarios.md"; then day_section; else cat "$LD/scenarios.md"; fi
   if [ -f "$LD/feedback-r$PREV.md" ]; then
     echo; echo "## Reviewer feedback on day $PREV (address all of it)"; cat "$LD/feedback-r$PREV.md"
-    [ -f "$LD/round$PREV/report.json" ] && echo "Previous report: $LD/round$PREV/report.json (carry forward still-valid results with their evidence paths, re-verify, extend)."
   fi
-  [ -f "$RUN/filed.txt" ] && { echo; echo "## Already filed (do not re-report; a me-too on the square is fine)"; cat "$RUN/filed.txt"; }
+  if [ -f "$LD/round$PREV/verdict.json" ]; then
+    echo; echo "## Your bugs from day $PREV (already recorded: re-check, never report again)"
+    echo "Re-test each one once, on the way to today's scenarios. Record the result under \"rechecks\" in report.json"
+    echo "({\"title\", \"status\": \"still|fixed|changed\", \"evidence\"}). Put one in findings only if it now fails in a new way."
+    python3 -c "import json,sys;[print('-',f.get('title'),'|',f.get('route','')) for f in json.load(open(sys.argv[1])).get('verified_findings',[])]" "$LD/round$PREV/verdict.json" 2>/dev/null
+  fi
+  [ -s "$RUN/filed.txt" ] && { echo; echo "## Already filed (do not re-report; a me-too on the square is fine)"; cat "$RUN/filed.txt"; }
   echo; echo "## Your tools"; echo "$TOOL_NOTE"
   echo; echo "## If the test servers go down"
-  echo "Before each scenario, and whenever the product fails in a way that looks like the server (5xx, sign-in refused with the right password, blank page): run  test -f $RUN/STACK_DOWN && cat $RUN/STACK_DOWN . If it exists the servers are down: record nothing, wait with  while [ -f $RUN/STACK_DOWN ]; do sleep 60; done , then sign in again and redo the step. Never report an error you saw while STACK_DOWN existed."
+  echo "Before each scenario, and whenever the product fails in a way that looks like the server (5xx, sign-in refused with the right password, blank page): run  test -f \$RUN/STACK_DOWN && cat \$RUN/STACK_DOWN . If it exists the servers are down: record nothing, wait with  while [ -f \$RUN/STACK_DOWN ]; do sleep 60; done , then sign in again and redo the step. Never report an error you saw while STACK_DOWN existed."
 } > "$OUT/prompt.md"
 
 cd "$OUT"
@@ -136,7 +163,9 @@ run_engine() {
   case "$E" in
     codex)
       # the newest codex session of this day, even if another engine ran in between: resume beats a fresh start
-      SID=$(grep -h -m1 '^session id:' $(ls -t "$OUT"/tester*.log 2>/dev/null) 2>/dev/null | head -1 | awk '{print $3}')
+      # (only when a log exists: grep with no file argument would read stdin and block the runner)
+      SID=""; LOGS=$(ls -t "$OUT"/tester*.log 2>/dev/null)
+      [ -n "$LOGS" ] && SID=$(grep -h -m1 '^session id:' $LOGS 2>/dev/null < /dev/null | head -1 | awk '{print $3}')
       if [ -n "$RESUME" ] && [ -n "$SID" ]; then
         [ "$PREV_ENGINE" = codex ] && R_MSG="$MSG" || R_MSG="$MSG_HANDOFF"
         timeout "$ROUND_TIMEOUT_S" codex exec resume "$SID" --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
@@ -146,14 +175,16 @@ run_engine() {
           ${M:+-m "$M"} ${F:+-c model_reasoning_effort="$F"} < "$OUT/prompt.md" > "$LOG" 2>&1
       fi ;;
     claude)
+      local LEAN=""; [ "${CLAUDE_LEAN:-1}" = 1 ] && LEAN="--setting-sources project --strict-mcp-config --disable-slash-commands"
+      local BUDGET=""; [ -n "${CHUNK_USD:-5}" ] && [ "${CHUNK_USD:-5}" != 0 ] && BUDGET="--max-budget-usd ${CHUNK_USD:-5}"
       SID=$(cat "$OUT/claude-session" 2>/dev/null)
-      if [ -n "$RESUME" ] && [ -n "$SID" ]; then
+      if [ -n "$RESUME" ] && [ -n "$SID" ] && [ -z "$FRESH" ]; then
         [ "$PREV_ENGINE" = claude ] && R_MSG="$MSG" || R_MSG="$MSG_HANDOFF"
-        timeout "$ROUND_TIMEOUT_S" claude -p --resume "$SID" ${M:+--model "$M"} ${F:+--effort "$F"} \
+        timeout "$ROUND_TIMEOUT_S" claude -p --resume "$SID" ${M:+--model "$M"} ${F:+--effort "$F"} $LEAN $BUDGET \
           --dangerously-skip-permissions "$R_MSG" < /dev/null > "$LOG" 2>&1
       else
         SID=$(uuidgen | tr 'A-Z' 'a-z'); echo "$SID" > "$OUT/claude-session"
-        timeout "$ROUND_TIMEOUT_S" claude -p --session-id "$SID" ${M:+--model "$M"} ${F:+--effort "$F"} \
+        timeout "$ROUND_TIMEOUT_S" claude -p --session-id "$SID" ${M:+--model "$M"} ${F:+--effort "$F"} $LEAN $BUDGET \
           --dangerously-skip-permissions < "$OUT/prompt.md" > "$LOG" 2>&1
       fi ;;
     opencode)
@@ -177,16 +208,26 @@ has_session() {
     *) return 1 ;;
   esac
 }
-TRIES=0
+# model and effort for an engine: TESTER's own settings, the fallback's, else <ENGINE>_MODEL / <ENGINE>_EFFORT
+engine_model() {
+  local U; U=$(echo "$1" | tr 'a-z' 'A-Z')
+  if [ "$1" = "${TESTER:-codex}" ]; then echo "${TESTER_MODEL:-}|${TESTER_EFFORT:-}"
+  elif [ "$1" = "${FALLBACK_TESTER:-}" ]; then echo "${FALLBACK_MODEL:-}|${FALLBACK_EFFORT:-}"
+  else eval "echo \"\${${U}_MODEL:-}|\${${U}_EFFORT:-}\""; fi
+}
+TRIES=0; CHUNKS=0; FRESH=""
 while :; do
   TRIES=$((TRIES+1)); [ "$TRIES" -gt 30 ] && done_with "exit=1 rc=too-many-switches"
   . "$RUN/config.env"   # re-read each attempt, so model and effort changes apply on the next switch
-  expire_marker "$RUN/TESTER_FALLBACK"; expire_marker "$RUN/QUOTA_PAUSE"
-  [ -f "$RUN/QUOTA_PAUSE" ] && done_with "exit=quota rc=all-engines-out"
-  ENGINE="${TESTER:-codex}"; MODEL="${TESTER_MODEL:-}"; EFFORT="${TESTER_EFFORT:-}"
-  if [ -f "$RUN/TESTER_FALLBACK" ] && [ -n "${FALLBACK_TESTER:-}" ]; then
-    ENGINE="$FALLBACK_TESTER"; MODEL="${FALLBACK_MODEL:-}"; EFFORT="${FALLBACK_EFFORT:-}"
+  expire_marker "$RUN/TESTER_FALLBACK"
+  ENGINE="${CARD_ENGINE:-${TESTER:-codex}}"
+  # the fallback only replaces an engine that ran out (the marker names it), not every character's engine
+  if [ -f "$RUN/TESTER_FALLBACK" ] && [ -n "${FALLBACK_TESTER:-}" ] && grep -q "from=$ENGINE " "$RUN/TESTER_FALLBACK"; then
+    ENGINE="$FALLBACK_TESTER"
   fi
+  expire_marker "$RUN/QUOTA_PAUSE.$ENGINE"
+  [ -f "$RUN/QUOTA_PAUSE.$ENGINE" ] && done_with "exit=quota rc=$ENGINE-paused engine=$ENGINE"
+  MODEL="$(engine_model "$ENGINE" | cut -d'|' -f1)"; EFFORT="$(engine_model "$ENGINE" | cut -d'|' -f2)"
   PREV_ENGINE=$(cat "$OUT/engine" 2>/dev/null); echo "$ENGINE" > "$OUT/engine"
   RESUME=""; [ -s "$OUT/report.json" ] && { cp "$OUT/report.json" "$OUT/report.partial.json"; RESUME=1; }
   N=$(ls "$OUT"/tester*.log 2>/dev/null | wc -l | tr -d ' ')
@@ -194,19 +235,28 @@ while :; do
   state "running" "{\"engine\": \"$ENGINE\", \"device\": \"$DEVICE\", \"surface\": \"$SURFACE\"}"
   echo "$(date) attempt $TRIES engine=$ENGINE prev=${PREV_ENGINE:-none} resume=${RESUME:-no}" >> "$OUT/resume.log"
   # a fresh session (no earlier session for this engine) needs the handoff note in its prompt
-  if [ -n "$RESUME" ] && [ "$PREV_ENGINE" != "$ENGINE" ] && ! has_session "$ENGINE"; then
+  if [ -n "$RESUME" ] && { [ -n "$FRESH" ] || { [ "$PREV_ENGINE" != "$ENGINE" ] && ! has_session "$ENGINE"; }; }; then
     printf '\n## RESUME (%s)\nThis day was started by another tester and interrupted. Partial progress: %s/report.partial.json, evidence in %s/shots/ and %s/evidence/, your memory in memory.md. Copy the partial report to report.json, keep its valid results and evidence, continue with every not_run scenario.\n' "$(date +%H:%M)" "$OUT" "$OUT" "$OUT" >> "$OUT/prompt.md"
   fi
-  run_engine "$ENGINE" "$MODEL" "$EFFORT" "$LOG"; RC=$?
+  run_engine "$ENGINE" "$MODEL" "$EFFORT" "$LOG"; RC=$?; FRESH=""
+  # a spent chunk is not a failure: a fresh session carries on from report.json with a short context
+  if [ "$ENGINE" = claude ] && tail -c 2000 "$LOG" | grep -q "Exceeded USD budget"; then
+    CHUNKS=$((CHUNKS+1))
+    if [ "$CHUNKS" -lt "${MAX_CHUNKS:-8}" ]; then
+      echo "$(date) chunk $CHUNKS spent (CHUNK_USD=${CHUNK_USD:-5}): fresh session continues" >> "$OUT/resume.log"
+      FRESH=1; continue
+    fi
+    RC=0; break
+  fi
   if limit_hit "$LOG"; then
-    if [ ! -f "$RUN/TESTER_FALLBACK" ] && [ -n "${FALLBACK_TESTER:-}" ]; then
+    if [ ! -f "$RUN/TESTER_FALLBACK" ] && [ -n "${FALLBACK_TESTER:-}" ] && [ "$ENGINE" != "$FALLBACK_TESTER" ]; then
       # the primary ran out: every character's next attempt uses the fallback (this one right away)
       echo "since=$(date +%s) from=$ENGINE to=$FALLBACK_TESTER lane=$LANE" > "$RUN/TESTER_FALLBACK"
       continue
     fi
-    # the fallback is out too, or there is none: the day stops; the workflow resumes it later
-    [ -f "$RUN/QUOTA_PAUSE" ] || echo "which=all-engines reason=$ENGINE-limit lane=$LANE at $(date)" > "$RUN/QUOTA_PAUSE"
-    done_with "exit=quota rc=$ENGINE-limit"
+    # no fallback, or the fallback is out too: this engine pauses; crowd.py starts the day again later
+    [ -f "$RUN/QUOTA_PAUSE.$ENGINE" ] || echo "engine=$ENGINE lane=$LANE at $(date)" > "$RUN/QUOTA_PAUSE.$ENGINE"
+    done_with "exit=quota rc=$ENGINE-limit engine=$ENGINE"
   fi
   break
 done

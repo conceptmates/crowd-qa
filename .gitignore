@@ -3,3 +3,4 @@ __pycache__/
 node_modules/
 examples/demo-app/data/
 .DS_Store
+tests/.work/

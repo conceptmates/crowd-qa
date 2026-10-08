@@ -5,7 +5,9 @@ Written by the scenario planner (the orchestrating model) for one character, rea
 ## Mix
 - At least 60% of scenarios are failure or edge paths.
 - Every happy path has at least two matching failures (the same journey going wrong in different ways).
-- 20-40 scenarios per lane, then an "Exhaustive sweep" section.
+- At most `SCEN_MAX` (default 20) scenarios per day, then one "Exhaustive sweep" section.
+- One `## Day N` section per day; each scenario headed `### S<n> — <title>  [happy|failure|edge]`. crowd.py
+  counts coverage from these headings and the tester gets only its day's section.
 
 ## Where failures come from
 Think like an average person on a bad day, and like the backend's validation rules:

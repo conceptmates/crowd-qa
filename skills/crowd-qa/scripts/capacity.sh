@@ -5,7 +5,9 @@
 #        (.active/<lane> holding holder-pid) under a lock so two lanes never take the same slot.
 #        Logs each decision to capacity.log.
 # A lane fits when: running testers < HARD_CAP, free memory (free + inactive + purgeable) >= LANE_RAM_MB,
-# free-memory % >= MIN_FREE_PCT, swap did not grow > 1 GB in the last 5 min, 1-min load < cores * MAX_LOAD_PER_CORE.
+# free-memory % >= MIN_FREE_PCT, swap did not grow > 1 GB in the last 5 min, swap in use <= SWAP_MAX_MB, and
+# 1-min load < cores * MAX_LOAD_PER_CORE. (A laptop admitted 20 testers by free memory alone, reached load 940 and
+# 14 GB of swap, and died for four hours.)
 set -u
 RUN="$1"; MODE="${2:-check}"; LANE="${3:-?}"; HOLDER="${4:-$PPID}"
 mkdir -p "$RUN/.active"
@@ -39,6 +41,7 @@ fits() {
   if [ "$free_mb" -lt "$LANE_RAM_MB" ]; then REASON="free ${free_mb}MB < ${LANE_RAM_MB}MB per lane"; return 1; fi
   if [ "$free_pct" -lt "$MIN_FREE_PCT" ]; then REASON="free ${free_pct}% < ${MIN_FREE_PCT}%"; return 1; fi
   if [ "$grow" -gt 1024 ]; then REASON="swap grew ${grow}MB in 5 min"; return 1; fi
+  if [ "$swap_mb" -gt "${SWAP_MAX_MB:-4096}" ]; then REASON="swap ${swap_mb}MB > ${SWAP_MAX_MB:-4096}MB"; return 1; fi
   if python3 -c "import sys;sys.exit(0 if $load >= $cores*$MAX_LOAD_PER_CORE else 1)"; then REASON="load $load >= ${cores}x$MAX_LOAD_PER_CORE"; return 1; fi
   REASON="ok: running=$running free=${free_mb}MB/${free_pct}% swap=${swap_mb}MB(+${grow}) load=$load"
   return 0
@@ -54,5 +57,5 @@ while :; do
     rmdir "$RUN/.admit.lock"
   fi
   [ $first = 1 ] && log "WAIT $REASON"; first=0
-  sleep 60
+  sleep "${CAPACITY_POLL_S:-60}"
 done
