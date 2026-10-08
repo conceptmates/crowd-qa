@@ -70,6 +70,9 @@ done
 pgrep -f "state-saver.sh $RUN" >/dev/null && ok "state saver running" || bad "state saver not running: bash $RUN/scripts/restart-watchers.sh $RUN"
 if [ -n "${HEALTH_CHECKS:-}" ]; then
   pgrep -f "api-watch.sh $RUN" >/dev/null && ok "api-watch running" || bad "api-watch not running: bash $RUN/scripts/restart-watchers.sh $RUN"
+  # run every check now: a missing canary account (a reset database) passes the stack check but holds the crowd
+  hc=$(bash "$RUN/scripts/api-watch.sh" "$RUN" once 2>&1) && ok "health checks pass now" || bad "health checks fail now ($hc): fix them, or the crowd waits on STACK_DOWN"
+  [ -n "${NOTIFY_CMD:-}" ] && ok "NOTIFY_CMD set" || echo "NOTE  NOTIFY_CMD is empty: nobody hears about an outage until someone runs status (a dry run sat 90 minutes on a missing canary)"
   [ -f "$RUN/STACK_DOWN" ] && bad "STACK_DOWN is set: $(cat "$RUN/STACK_DOWN")"
 else bad "HEALTH_CHECKS is empty: without api-watch an outage burns character-days (references/hooks.md)"; fi
 

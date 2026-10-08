@@ -147,6 +147,8 @@ day_section() {  # only today's scenarios plus the sweep; the other days' plans 
   echo; echo "## If the test servers go down"
   echo "Before each scenario, and whenever the product fails in a way that looks like the server (5xx, sign-in refused with the right password, blank page): run  test -f \$RUN/STACK_DOWN && cat \$RUN/STACK_DOWN . If it exists the servers are down: record nothing, wait with  while [ -f \$RUN/STACK_DOWN ]; do sleep 60; done , then sign in again and redo the step. Never report an error you saw while STACK_DOWN existed."
 } > "$OUT/prompt.md"
+# engines refuse a prompt with one invalid UTF-8 byte (Codex did, on a stack-faults line), so clean it here
+python3 -c "import sys;p=sys.argv[1];b=open(p,'rb').read();open(p,'w',encoding='utf-8').write(b.decode('utf-8','replace'))" "$OUT/prompt.md"
 
 cd "$OUT"
 export AGENT_DEVICE_SESSION="$SESSION" AGENT_BROWSER_SESSION="$SESSION"

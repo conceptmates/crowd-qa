@@ -418,6 +418,7 @@ def run():
     futs = {}
     log(f"run: {len(chars)} characters x {DAYS} days, {sum(v == 'pending' for v in st.values())} character-days to run")
     finished = ("judged", "skipped", "failed")
+    last_down_note = 0
     while not all(v in finished for v in st.values()):
         # finished runners: DONE written, or the process died without one
         for k in [k for k, v in st.items() if v == "running"]:
@@ -451,6 +452,12 @@ def run():
             except Exception as e:  # a judge crash must not stop the crowd
                 log(f"judge {k}: {e}")
                 st[k] = "judged"
+        down = os.path.exists(os.path.join(RUN, "STACK_DOWN"))
+        if down and time.time() - last_down_note > 1800:
+            log(f"STACK_DOWN ({read(os.path.join(RUN, 'STACK_DOWN')).strip()}): no character starts until the health checks pass")
+            last_down_note = time.time()
+        elif not down:
+            last_down_note = 0
         running = sum(v == "running" for v in st.values())
         for c in chars:
             for d in range(1, DAYS + 1):
@@ -502,15 +509,16 @@ def dedupe():
             same_route = (found[i].get("route") or "") == (found[j].get("route") or "") != ""
             if s >= 0.6 or (s >= 0.45 and same_route):
                 parent[root(j)] = root(i)
-            elif s >= 0.3 and same_route:
-                ambiguous.append((i, j))
+            elif s >= 0.35:
+                ambiguous.append((i, j))   # the same bug seen on another surface (web and API) has another route
     if ambiguous and cfg("DEDUPE_LLM", "1") == "1":
         out = os.path.join(RUN, "state", "dedupe-answer.json")
         pairs = [{"pair": k, "a": found[i]["title"], "b": found[j]["title"], "route": found[i].get("route"),
                   "a_actual": found[i].get("actual", "")[:300], "b_actual": found[j].get("actual", "")[:300]}
                  for k, (i, j) in enumerate(ambiguous[:200])]
-        ans = llm("dedupe", "These pairs of verified crowd-QA findings share a screen and look alike. For each, say "
-                  "whether they are the same bug (same root cause, or the same symptom on the same screen). Answer "
+        ans = llm("dedupe", "These pairs of verified crowd-QA findings look alike. For each, say whether they are the "
+                  "same bug: the same root cause, even when one was seen in the web app and the other through the API "
+                  "or the CLI, or the same symptom on the same screen. Answer "
                   '{"same": [<pair numbers that are the same bug>]}.\n' + json.dumps(pairs, indent=1),
                   cfg("JUDGE_MODEL", "sonnet"), "low", out, ("same",))
         for k in (ans or {}).get("same", []):

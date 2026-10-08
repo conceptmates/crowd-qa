@@ -44,7 +44,7 @@ while :; do
       rm -f "$RUN/STACK_DOWN"
       echo "$(date '+%F %T') RECOVERED (down since $down_since)" >> "$LOG"
       python3 "$RUN/scripts/square.py" "$RUN" post organiser "NOTICE: the test servers are back ($(date +%H:%M)). Anything that failed between $down_since and now was the outage, not the product. Carry on where you stopped." >/dev/null 2>&1
-      echo "- **Stack outage $down_since–$(date +%H:%M)** (api-watch.sh): every finding in that window is a stack fault." >> "$RUN/stack-faults.md"
+      echo "- **Stack outage ${down_since:-?} to $(date +%H:%M)** (api-watch.sh): every finding in that window is a stack fault." >> "$RUN/stack-faults.md"
       notify "crowd-qa: test servers back at $(date +%H:%M) (down since $down_since)"
     fi
     fails=0

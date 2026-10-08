@@ -111,7 +111,8 @@ class Prompt(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.r = Run("prompt", lanes("maya", "leo"), tester={"maya": {"findings": [{"title": "Save button loses the draft"}]}})
-        open(cls.r.path("stack-faults.md"), "w").write("- Uploads fail on this stack: the fake storage has no bucket.\n")
+        open(cls.r.path("stack-faults.md"), "wb").write(b"- Uploads fail on this stack: the fake storage has no bucket.\n"
+                                                       b"- **Stack outage \x80\x9317:41** (an old api-watch line)\n")
         cls.res = cls.r.crowd("run")
 
     def test_run_finished(self):
@@ -139,6 +140,9 @@ class Prompt(unittest.TestCase):
 
     def test_known_stack_faults_are_in_the_prompt(self):
         self.assertIn("Uploads fail on this stack", self.r.read("lanes", "leo", "round1", "prompt.md"))
+
+    def test_prompt_is_valid_utf8_even_when_a_source_file_is_not(self):
+        open(self.r.path("lanes", "leo", "round1", "prompt.md"), "rb").read().decode("utf-8")
 
     def test_day2_rechecks_yesterdays_bugs_instead_of_carrying_them(self):
         p2 = self.r.read("lanes", "maya", "round2", "prompt.md")
