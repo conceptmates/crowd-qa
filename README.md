@@ -31,6 +31,7 @@ Testers run on the CLI you choose during preflight: `codex`, `claude` or `openco
 | Stack health | `scripts/api-watch.sh` (holds the crowd while checks fail), `scripts/watchdog.sh` (brings the stack back, backs up and restores the database) |
 | Surviving restarts | `scripts/save-state.py`, `scripts/state-saver.sh`, `scripts/resume.sh` |
 | Hooks a project provides | `references/hooks.md` |
+| Token cost | `references/cost.md`: where a 30-character run spent its tokens, and the changes that cut about 70% of them |
 
 ## Worked example
 

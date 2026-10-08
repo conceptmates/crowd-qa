@@ -28,4 +28,7 @@ new machine.
 | A fresh relaunch over old round dirs | Judges return an existing `verdict.json` unchanged | Archive `lanes/*/round*` before a fresh relaunch, or use `redo` tags when resuming |
 | The tester account was shared with the user's own work | It ran out before the crowd used much | A fallback engine (FALLBACK_TESTER) takes over at the limit; the primary is retried later |
 | A tester opened extra browsers for a second user | Load on the orchestrating machine went from 7 to 35 | The brief names one extra session per character (`<session>-2`) and nothing else |
+| Planners re-explored the source each, and restarts re-ran them (95 planners for 30 characters) | Half of all orchestrator tokens | One product map; `args.planned` skips existing plans in code (`references/cost.md`) |
+| Judges hunted for reports, logs and posts with shell commands | Most of every judge's turns | `judge-pack.py` puts each day's inputs in one file |
+| A tester restarted after a fallback started a fresh session | It re-read the whole brief and lost its context | The runner resumes the newest session of that engine |
 | `pkill -f <name>` over SSH | Killed the SSH session itself | Kill by pid file |
