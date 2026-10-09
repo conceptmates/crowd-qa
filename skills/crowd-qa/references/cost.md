@@ -14,6 +14,25 @@ week of Codex quota.
 | Agents that only waited on testers | $106 | an agent per character-day, polling |
 | Bought nothing | $156 | redone days, agents re-started on resume, agents killed before they returned |
 
+## The same run with this version (estimate)
+
+Scaled from a measured 3-character dry run ($3.16 of model steps and $1.72 of Sonnet testers for three
+character-days) and the measured tester savings, at Opus $4/$20 and Sonnet $2/$10 per million tokens.
+
+| | Measured run | This version (est.) |
+|---|---|---|
+| Opus steps: map, plans, day judges, merge check, bug checks, report | $541 | ~$115 |
+| Opus orchestration: the session, plus agents that waited, restarted or were killed | $375 | ~$30 |
+| Sonnet testers | $166 | ~$120 (more days on Sonnet, each cheaper) |
+| Claude total | ~$1,005 | ~$265-295 |
+| Claude tokens processed | ~1,250M | ~410M |
+| Codex tokens | 1,559M, about 62% of a week's quota | ~150-250M, with 3-5 characters on Codex |
+| Per filed issue (199 filed) | ~$5 | ~$1.40 |
+
+What moves the estimate: the number of characters on Codex (more Codex, less Claude spend), bugs found (a bug
+check is about $0.20 on Opus), and scenarios per day (`SCEN_MAX`). `crowd.py <run> status` shows the real figures
+as a run goes: model steps from `state/costs.jsonl`, Claude testers from their session transcripts.
+
 ## What the skill does about it
 
 | Change | Where | Effect (est.) |

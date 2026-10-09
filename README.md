@@ -36,7 +36,7 @@ Codex for characters picked before launch is the recommendation). Web characters
 | Stack health | `scripts/api-watch.sh` (holds the crowd while checks fail), `scripts/watchdog.sh` (brings the stack back, backs up and restores the database) |
 | Surviving restarts | `scripts/save-state.py`, `scripts/state-saver.sh`, `scripts/resume.sh` |
 | Hooks a project provides | `references/hooks.md` |
-| Token cost | `references/cost.md`: where a 30-character run spent about $1,000, and what the skill now does instead |
+| Token cost | `references/cost.md`: where a 30-character run spent about $1,000, what the skill does instead, and an estimate of about $280 for the same run now |
 | Tests | `tests/test_crowd.py`: the scripts end to end with fake engines (no model, no network) |
 
 ## Worked example
