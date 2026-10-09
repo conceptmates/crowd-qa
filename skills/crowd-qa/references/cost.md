@@ -20,16 +20,20 @@ week of Codex quota.
 |---|---|---|
 | Waiting, scheduling, quota pauses and resuming are code, not agents | `scripts/crowd.py` | the $106 of waiting agents and the $77 of re-started agents go away |
 | Coverage, missing evidence, duplicates of filed issues and of a character's earlier days are checked in code before any judge runs; a day with nothing left to check calls no model | `crowd.py` (`precheck`, `coverage`) | judges see fewer findings; quiet days are free |
-| One judge pack per day; judges on Sonnet, reading only cited lines | `judge-pack.py`, `crowd.py` | judging about -55% (day 2 of the measured run: $2.85 to $0.35 per judge) |
-| Bug checks on Sonnet; Opus only for high severity or an unconfirmed cause; a wrong screenshot is repaired, not refused | `crowd.py` (`verify`) | about -$85; real bugs no longer lost to a mislabelled screenshot |
+| One judge pack per day, read by an Opus judge that opens only cited lines and only the findings that passed the code checks | `judge-pack.py`, `crowd.py` | judge turns about -75% (the pack took day-2 judges from 38 turns to 10) |
+| Bug checks on Opus, one per merged bug; a wrong screenshot is repaired, not refused | `crowd.py` (`verify`) | real bugs no longer lost to a mislabelled screenshot |
 | Merging, labels, issue bodies, evidence push and filing are code; a model is asked only about look-alike pairs on the same screen | `crowd.py` (`dedupe`, `file_issues`) | one small call instead of a merge agent and a push agent per repo |
-| One product map; planners read it, on Sonnet, with at most 3 source lookups | `crowd.py` (`plan`) | planning about -90% |
+| One product map; Opus planners read it, with at most 3 source lookups, and an existing plan is never rewritten | `crowd.py` (`plan`) | planning about -80% |
 | Claude testers start lean: no user settings, hooks, plugins, MCP servers or skills | `run-tester.sh` (`CLAUDE_LEAN`) | first-turn context 37K to 19K tokens, measured |
 | Claude testers run in chunks of `CHUNK_USD`; a spent chunk continues in a fresh session from report.json | `run-tester.sh` | late turns stop re-reading 300K+ tokens |
 | The tester prompt holds only today's scenarios, 20 square posts, and starts with the parts every character shares, so it caches across the crowd | `run-tester.sh` | prompt about -24%; a real shared prefix |
 | Day 2 re-checks day 1's bugs instead of reporting them again | `run-tester.sh`, tester brief | fewer repeats to judge and merge |
 | Testers wait for elements, not fixed sleeps; check screens as text; open screenshots only to check evidence | tester brief | a third of tester time was fixed sleeps; carried images were 10% of tester tokens |
 | A runner probes the stack itself before starting; per-engine quota pauses | `run-tester.sh`, `api-watch.sh once` | no character-days against a dead server; one engine's quota never stops the others |
+
+Judgement steps (map, plans, judging, merge check, bug checks, report) stay on Opus by choice: a Sonnet bug check
+refused a real seeded bug in a dry run. Set `PLANNER_MODEL`, `JUDGE_MODEL` or `VERIFY_MODEL` to `sonnet` to halve
+those steps at that risk.
 
 Every model step's cost lands in `state/costs.jsonl`; `crowd.py <run> status` adds it up.
 

@@ -204,7 +204,7 @@ For each surface in use (web screens, mobile screens, CLI commands, API endpoint
 visible labels of buttons, fields and tabs, what each role may do, plan or feature gates, limits and validation
 rules, the server-side refusals a user can hit and their wording, and anything scheduled or asynchronous. Cite
 file:line for rules. Group by area. Tables and lists, completeness over prose.""",
-            cfg("PLANNER_MODEL", "sonnet"), cfg("MAP_EFFORT", "high"), pm, text=True)
+            cfg("PLANNER_MODEL", "opus"), cfg("MAP_EFFORT", "high"), pm, text=True)
     todo = [c for c in characters() if not plan_ok(c["id"])]
     skipped = set(jload(os.path.join(RUN, "state", "skipped.json"), []))
     cap = cfg_int("SCEN_MAX", 20)
@@ -225,7 +225,7 @@ made and to what other characters did to them. At least 60% failure and edge pat
 For a boundary tester, stay inside the product's own screens, commands and endpoints and describe each check
 plainly. Do not open the product."""
         for attempt in (1, 2):
-            llm(f"plan:{cid}", prompt, cfg("PLANNER_MODEL", "sonnet"), cfg("PLANNER_EFFORT", "medium"), sp, text=True)
+            llm(f"plan:{cid}", prompt, cfg("PLANNER_MODEL", "opus"), cfg("PLANNER_EFFORT", "medium"), sp, text=True)
             if plan_ok(cid):
                 big = [d for d in range(1, DAYS + 1) if len(day_scenarios(cid, d)) > cap]
                 if big:
@@ -328,7 +328,7 @@ Answer: {{"in_character": 0-100 (how believably the tester played this person), 
 character names>", "severity": "critical|high|medium|low", "repo": "app|backend", "mechanism": "<file:line and
 why, or not confirmed>", "voice": "<the tester's in-character line, one or two plain sentences>",
 "confirmers": [{{"id", "line", "screenshot": "<absolute path you opened>"}}], "cant_repro": ["..."]}}]}}""",
-                  cfg("JUDGE_MODEL", "sonnet"), cfg("JUDGE_EFFORT", "medium"), out, ("findings",))
+                  cfg("JUDGE_MODEL", "opus"), cfg("JUDGE_EFFORT", "high"), out, ("findings",))
         byid = {str(f.get("id")): f for f in keep}
         if ans is None:
             rejected += [{"id": f.get("id"), "title": f.get("title"), "reason": "judge failed twice", "by": "code"} for f in keep]
@@ -520,7 +520,7 @@ def dedupe():
                   "same bug: the same root cause, even when one was seen in the web app and the other through the API "
                   "or the CLI, or the same symptom on the same screen. Answer "
                   '{"same": [<pair numbers that are the same bug>]}.\n' + json.dumps(pairs, indent=1),
-                  cfg("JUDGE_MODEL", "sonnet"), "low", out, ("same",))
+                  cfg("JUDGE_MODEL", "opus"), "low", out, ("same",))
         for k in (ans or {}).get("same", []):
             if isinstance(k, int) and 0 <= k < len(ambiguous):
                 i, j = ambiguous[k]
@@ -646,8 +646,8 @@ def render_body(x, urls):
 def verify(x, repo, attempt=1):
     """The model checks one merged bug before filing. High severity and unconfirmed causes go to ESCALATE_MODEL."""
     hard = SEV.get(x.get("severity"), 0) >= 3 or "not confirmed" in (x.get("mechanism") or "not confirmed")
-    model = cfg("ESCALATE_MODEL", "opus") if hard else cfg("VERIFY_MODEL", "sonnet")
-    effort = cfg("ESCALATE_EFFORT", "high") if hard else cfg("VERIFY_EFFORT", "medium")
+    model = cfg("ESCALATE_MODEL", "opus") if hard else cfg("VERIFY_MODEL", "opus")
+    effort = cfg("ESCALATE_EFFORT", "high") if hard else cfg("VERIFY_EFFORT", "high")
     cands = []
     if repo and not cfg("FILE_CMD"):
         q = " ".join(sorted(words(x["title"]), key=len, reverse=True)[:5])

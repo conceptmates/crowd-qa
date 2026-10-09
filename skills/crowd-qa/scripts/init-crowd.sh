@@ -55,9 +55,10 @@ DAYS=2                          # simulated days per character
 
 # --- model steps run by crowd.py (everything else is code) -------------------------------------------
 LLM_CLI="claude"
-PLANNER_MODEL="sonnet"; PLANNER_EFFORT="medium"; MAP_EFFORT="high"
-JUDGE_MODEL="sonnet";   JUDGE_EFFORT="medium"
-VERIFY_MODEL="sonnet";  VERIFY_EFFORT="medium"
+# Judgement steps run on Opus: a Sonnet bug check refused a real seeded bug in a dry run
+PLANNER_MODEL="opus";   PLANNER_EFFORT="medium"; MAP_EFFORT="high"
+JUDGE_MODEL="opus";     JUDGE_EFFORT="high"
+VERIFY_MODEL="opus";    VERIFY_EFFORT="high"
 ESCALATE_MODEL="opus";  ESCALATE_EFFORT="high"   # bugs of high severity or with an unconfirmed cause
 REPORT_MODEL="opus";    REPORT_EFFORT="medium"
 SOURCE_PATHS=""                 # source the planners and judges may read, space-separated absolute paths

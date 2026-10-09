@@ -33,9 +33,11 @@ Smaller and cheaper models were tried as testers too. On days with long multi-st
 scenarios and most of their findings did not hold up, so they are not offered here.
 
 ## The model steps (crowd.py)
-Planning, judging and bug checks run on Sonnet. Bugs of high severity or with an unconfirmed cause are
-re-checked on Opus before filing (`ESCALATE_MODEL`); the launch report is written by Opus. In the measured run,
-Opus re-checking every bug refused only 3.9% of them, so checking the rest on Sonnet costs little in precision.
+The product map, the plans, day judging, the merge check, every bug check before filing and the launch report
+run on Opus (`PLANNER_MODEL`, `JUDGE_MODEL`, `VERIFY_MODEL`, `REPORT_MODEL`). These are the calls that decide
+what gets tested and what gets filed. In a dry run, a Sonnet bug check refused a real seeded bug as "a missing
+feature", so the defaults stay on Opus. The waiting, scheduling and bookkeeping between them are code, which is
+where most of the earlier spend went.
 
 ## Rules that hold whatever the user picks
 - Assign an engine per character before launch. Moving a character between engines mid-day costs a fresh

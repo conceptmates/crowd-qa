@@ -30,7 +30,7 @@ Codex for characters picked before launch is the recommendation). Web characters
 | Choosing engines | `references/engines.md`; `scripts/preflight.sh` fails until the user has chosen |
 | The run loop | `scripts/crowd.py <run> all`: plan, run every character-day in dependency order, judge, merge, file, report. Each step skips work already on disk |
 | One character, one day | `scripts/run-tester.sh` (web, ios, android, cli, api; per-character engine, lean Claude sessions in budget chunks, per-engine quota pauses) |
-| Filing | per merged bug, in parallel: a model re-checks evidence and source (Opus for high severity or an unconfirmed cause), then code files through `gh` or a `FILE_CMD` hook |
+| Filing | per merged bug, in parallel: Opus re-checks evidence and source, then code files through `gh` or a `FILE_CMD` hook |
 | Town square | `scripts/square.py` (posts, replies), `scripts/square-view.py` (a live Discord-style page) |
 | Simulated customers | `scripts/customer.py` sends signed inbound events from a channels file |
 | Stack health | `scripts/api-watch.sh` (holds the crowd while checks fail), `scripts/watchdog.sh` (brings the stack back, backs up and restores the database) |
