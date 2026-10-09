@@ -328,7 +328,7 @@ Answer: {{"in_character": 0-100 (how believably the tester played this person), 
 character names>", "severity": "critical|high|medium|low", "repo": "app|backend", "mechanism": "<file:line and
 why, or not confirmed>", "voice": "<the tester's in-character line, one or two plain sentences>",
 "confirmers": [{{"id", "line", "screenshot": "<absolute path you opened>"}}], "cant_repro": ["..."]}}]}}""",
-                  cfg("JUDGE_MODEL", "opus"), cfg("JUDGE_EFFORT", "high"), out, ("findings",))
+                  cfg("JUDGE_MODEL", "opus"), cfg("JUDGE_EFFORT", "medium"), out, ("findings",))
         byid = {str(f.get("id")): f for f in keep}
         if ans is None:
             rejected += [{"id": f.get("id"), "title": f.get("title"), "reason": "judge failed twice", "by": "code"} for f in keep]
@@ -647,7 +647,7 @@ def verify(x, repo, attempt=1):
     """The model checks one merged bug before filing. High severity and unconfirmed causes go to ESCALATE_MODEL."""
     hard = SEV.get(x.get("severity"), 0) >= 3 or "not confirmed" in (x.get("mechanism") or "not confirmed")
     model = cfg("ESCALATE_MODEL", "opus") if hard else cfg("VERIFY_MODEL", "opus")
-    effort = cfg("ESCALATE_EFFORT", "high") if hard else cfg("VERIFY_EFFORT", "high")
+    effort = cfg("ESCALATE_EFFORT", "medium") if hard else cfg("VERIFY_EFFORT", "medium")
     cands = []
     if repo and not cfg("FILE_CMD"):
         q = " ".join(sorted(words(x["title"]), key=len, reverse=True)[:5])
