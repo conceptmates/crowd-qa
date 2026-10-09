@@ -378,7 +378,7 @@ class Filing(unittest.TestCase):
         self.assertEqual(res.returncode, 0)
         new = r.calls()[n:]
         self.assertEqual([c for c in new if c["kind"] in ("tester", "gh-body")], [])
-        self.assertEqual([c["step"] for c in new if c["kind"] == "step"], ["report"])
+        self.assertEqual([c["step"] for c in new if c["kind"] == "step"], [], "nothing changed, so no report either")
 
     def test_file_cmd_hook(self):
         r = Run("hook", lanes("maya"), config="DAYS=1", tester={"maya": {"findings": [{"title": "Search ignores accents"}]}})
@@ -390,6 +390,63 @@ class Filing(unittest.TestCase):
         sent = json.load(open(r.path("hooked", "0.json")))
         self.assertEqual(sent["title"], "Search ignores accents")
         self.assertIn("**Expected**", sent["body"])
+
+
+class EdgeCases(unittest.TestCase):
+    def test_a_rate_limited_model_step_waits_and_tries_again(self):
+        r = Run("limit", lanes("maya"), plans=False, config="DAYS=1 LLM_LIMIT_WAIT_S=0.2")
+        r.env["FAKE_LIMIT_STEP"] = "plan:"
+        self.assertEqual(r.crowd("plan").returncode, 0)
+        self.assertIn("## Day 1", r.read("lanes", "maya", "scenarios.md"))
+        self.assertEqual(len(r.calls(kind="limited")), 1)
+        self.assertIn("model limit", r.read("logs", "crowd.log"))
+        self.assertEqual(json.load(open(r.path("state", "skipped.json"))), [])
+
+    def test_a_bad_answer_is_asked_for_again_in_the_same_session(self):
+        r = Run("badjson", lanes("maya"), config="DAYS=1", tester={"maya": {"findings": [{"title": "Export drops the last row"}]}})
+        r.env["FAKE_BAD_JSON_STEP"] = "judge:"
+        r.crowd("run")
+        self.assertEqual(len(r.calls(kind="resume-step")), 1, "the retry resumes the session instead of starting over")
+        self.assertEqual(len(r.verdict("maya", 1)["verified_findings"]), 1)
+
+    def test_a_failed_judge_leaves_the_day_to_be_judged_again_not_its_bugs_rejected(self):
+        r = Run("judgefail", lanes("maya"), config="DAYS=1", tester={"maya": {"findings": [{"title": "Export drops the last row"}]}})
+        r.env["FAKE_JUDGE_FAIL"] = "1"
+        r.crowd("run")
+        self.assertFalse(os.path.exists(r.path("lanes", "maya", "round1", "verdict.json")))
+        self.assertIn("no verdict written", r.read("logs", "crowd.log"))
+        r.crowd("run")
+        self.assertEqual(len(r.verdict("maya", 1)["verified_findings"]), 1)
+        self.assertEqual(len(r.calls(kind="tester")), 1, "the tester is not run again")
+
+    def test_similar_but_not_identical_titles_go_to_the_judge(self):
+        r = Run("similar", lanes("maya"), config="DAYS=1",
+                tester={"maya": {"findings": [{"title": "Export button drops the last row of the CSV file"}]}})
+        open(r.path("filed.txt"), "w").write("#9 Export button drops the header row of the CSV\n")
+        r.crowd("run")
+        self.assertTrue([c for c in r.calls(kind="step") if c["step"].startswith("judge:") and c["dup_note"]])
+        self.assertEqual(len(r.verdict("maya", 1)["verified_findings"]), 1)
+
+    def test_a_filing_error_is_retried_and_an_existing_title_is_not_filed_twice(self):
+        r = Run("fileerr", lanes("maya"), config='DAYS=1 FILE_CMD="" TRACKERS="app=owner/app"', tester={"maya": {"findings": [
+            {"title": "Archive button deletes the whole conversation thread"}, {"title": "Search ignores accents in names"}]}})
+        r.env["FAKE_GH_FAIL_ONCE"] = "1"
+        r.env["FAKE_GH_EXISTING"] = "Search ignores accents in names"
+        r.crowd("all")
+        filed = json.load(open(r.path("state", "filed.json")))
+        self.assertEqual(json.load(open(r.path("state", "refused.json"))), {}, "a filing error is not a refusal")
+        self.assertIn("https://github.com/owner/app/issues/77", [v["url"] for v in filed.values()])
+        self.assertEqual(len(filed), 1)
+        r.crowd("file")
+        filed = json.load(open(r.path("state", "filed.json")))
+        self.assertEqual(len(filed), 2)
+        self.assertEqual([c["title"] for c in r.calls(kind="gh-body")], ["Archive button deletes the whole conversation thread"])
+
+    def test_status_counts_claude_tester_sessions(self):
+        r = Run("status", lanes("maya"), config="DAYS=1")
+        r.crowd("run")
+        self.assertTrue(r.read("lanes", "maya", "round1", "claude-sessions.txt").strip())
+        self.assertIn("Claude testers $", r.crowd("status").stdout)
 
 
 class Watchers(unittest.TestCase):

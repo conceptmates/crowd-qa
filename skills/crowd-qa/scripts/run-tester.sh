@@ -185,7 +185,7 @@ run_engine() {
         timeout "$ROUND_TIMEOUT_S" claude -p --resume "$SID" ${M:+--model "$M"} ${F:+--effort "$F"} $LEAN $BUDGET \
           --dangerously-skip-permissions "$R_MSG" < /dev/null > "$LOG" 2>&1
       else
-        SID=$(uuidgen | tr 'A-Z' 'a-z'); echo "$SID" > "$OUT/claude-session"
+        SID=$(uuidgen | tr 'A-Z' 'a-z'); echo "$SID" > "$OUT/claude-session"; echo "$SID" >> "$OUT/claude-sessions.txt"
         timeout "$ROUND_TIMEOUT_S" claude -p --session-id "$SID" ${M:+--model "$M"} ${F:+--effort "$F"} $LEAN $BUDGET \
           --dangerously-skip-permissions < "$OUT/prompt.md" > "$LOG" 2>&1
       fi ;;

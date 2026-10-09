@@ -80,11 +80,27 @@ def tester(prompt):
     print("Done. 2-line summary.")
 
 
-def model_step(prompt):
+def model_step(prompt, resumed=False):
     m = re.match(r"\[crowd-qa step=(\S+) out=(\S+)\]", prompt)
     step, out = m.group(1), m.group(2)
     model = ARGS[ARGS.index("--model") + 1] if "--model" in ARGS else ""
-    record("step", step=step, model=model)
+    flag = os.path.join(os.path.dirname(LOG), f".fake-{step.replace(':', '_').replace('/', '_')}")
+    if os.environ.get("FAKE_LIMIT_STEP") and step.startswith(os.environ["FAKE_LIMIT_STEP"]) and not os.path.exists(flag + "-limit"):
+        open(flag + "-limit", "w").close()
+        record("limited", step=step)
+        print("API Error: 429 rate limit exceeded")
+        sys.exit(1)
+    if os.environ.get("FAKE_BAD_JSON_STEP") and step.startswith(os.environ["FAKE_BAD_JSON_STEP"]) and not resumed:
+        record("step", step=step, model=model, bad=True)
+        open(out, "w").write("not json")
+        print(json.dumps({"total_cost_usd": 0.01, "num_turns": 2, "result": "DONE"}))
+        return
+    if os.environ.get("FAKE_JUDGE_FAIL") and step.startswith("judge:") and not os.path.exists(flag + "-fail2"):
+        record("step", step=step, model=model, failed=True)
+        open(flag + ("-fail2" if os.path.exists(flag + "-fail1") else "-fail1"), "w").close()
+        print("I could not finish.")
+        return
+    record("step", step=step, model=model, dup_note="may repeat" in prompt)
     if os.environ.get("FAKE_JUDGE_SLEEP") and step.startswith("judge:"):
         time.sleep(float(os.environ["FAKE_JUDGE_SLEEP"]))
     if step == "product-map":
@@ -130,6 +146,13 @@ def main():
         return
     if NAME == "gh":
         record("gh")
+        if ARGS[:2] == ["issue", "create"] and os.environ.get("FAKE_GH_FAIL_ONCE") and not os.path.exists(LOG + ".ghfail"):
+            open(LOG + ".ghfail", "w").close()
+            print("HTTP 502: server error", file=sys.stderr)
+            sys.exit(1)
+        if ARGS[:2] == ["issue", "list"] and any("in:title" in a for a in ARGS) and os.environ.get("FAKE_GH_EXISTING"):
+            print(json.dumps([{"number": 77, "title": os.environ["FAKE_GH_EXISTING"], "url": "https://github.com/owner/app/issues/77"}]))
+            return
         if ARGS[:2] == ["issue", "create"]:
             n = len([l for l in open(LOG) if '"create"' in l])
             body = open(ARGS[ARGS.index("--body-file") + 1]).read()
@@ -156,6 +179,15 @@ def main():
         print("fake-claude 1.0")
         return
     prompt = sys.stdin.read() if not sys.stdin.isatty() else ""
+    sessions = os.path.join(os.path.dirname(LOG), ".fake-sessions")
+    os.makedirs(sessions, exist_ok=True)
+    if "--session-id" in ARGS and prompt.startswith("[crowd-qa step="):
+        open(os.path.join(sessions, ARGS[ARGS.index("--session-id") + 1]), "w").write(prompt)
+    if "--resume" in ARGS and not prompt.startswith("[crowd-qa step="):
+        saved = os.path.join(sessions, ARGS[ARGS.index("--resume") + 1])
+        if os.path.exists(saved):            # a model step asked again in the same session
+            record("resume-step")
+            return model_step(open(saved).read(), resumed=True)
     if prompt.startswith("[crowd-qa step="):
         return model_step(prompt)
     if not prompt.strip():  # --resume with a message argument

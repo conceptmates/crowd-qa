@@ -25,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 
 RUN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else sys.exit(__doc__)
 CMD = sys.argv[2] if len(sys.argv) > 2 else "all"
@@ -128,26 +129,35 @@ def filed_titles():
 
 
 # ------------------------------------------------------------------------------------------------- the model
+LIMIT_RE = re.compile(r"usage limit|rate.?limit|overloaded|\b429\b|\b529\b|hit your limit|quota exceeded|out of extra usage", re.I)
+
+
 def llm(step, prompt, model, effort, out_path, required=(), text=False, timeout=5400):
     """One model call through the configured CLI. The model writes its answer to out_path; code checks it.
-    Returns the parsed JSON (or the text when text=True), None after two failed attempts."""
+    A usage or rate limit waits and tries again (LLM_LIMIT_WAIT_S, up to LLM_LIMIT_RETRIES times) instead of failing
+    the step. An answer that does not parse is asked for again in the same session, so the work is not paid twice.
+    Returns the parsed JSON (or the text when text=True), None when no valid answer came back."""
     cli = cfg("LLM_CLI", "claude")
     lean = ["--setting-sources", "project", "--strict-mcp-config", "--disable-slash-commands"] \
         if cfg("CLAUDE_LEAN", "1") == "1" and cli == "claude" else []
     what = "the file" if text else "one JSON object" + (f" with the keys {', '.join(required)}" if required else "")
     body = (f"[crowd-qa step={step} out={out_path}]\n{prompt}\n\nWrite {what} to {out_path}"
             f"{'' if text else ', check that it parses'}, then reply DONE. Keep command output short (| head -c 4000).")
-    for attempt in (1, 2):
+    sid, attempt, limits, msg = str(uuid.uuid4()), 0, 0, body
+    while attempt < 2:
         if os.path.exists(out_path) and not text:
             os.remove(out_path)
         cmd = [cli, "-p", "--dangerously-skip-permissions", "--output-format", "json", *lean]
+        if cli == "claude":
+            cmd += ["--resume", sid] if attempt else ["--session-id", sid]
         if model:
             cmd += ["--model", model]
         if effort:
             cmd += ["--effort", effort]
-        t0 = time.time()
+        t0, out = time.time(), ""
         try:
-            r = subprocess.run(cmd, input=body, text=True, capture_output=True, cwd=RUN, timeout=timeout)
+            r = subprocess.run(cmd, input=msg, text=True, capture_output=True, cwd=RUN, timeout=timeout)
+            out = (r.stdout or "") + (r.stderr or "")
             meta = jload_str(r.stdout)
         except subprocess.TimeoutExpired:
             meta = {}
@@ -157,7 +167,7 @@ def llm(step, prompt, model, effort, out_path, required=(), text=False, timeout=
                                 "s": round(time.time() - t0)}) + "\n")
         try:
             if text:
-                if os.path.getsize(out_path) > 0:
+                if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
                     return read(out_path)
                 raise ValueError("empty file")
             data = jload(out_path)
@@ -168,8 +178,18 @@ def llm(step, prompt, model, effort, out_path, required=(), text=False, timeout=
                 raise ValueError(f"missing keys {missing}")
             return data
         except (OSError, ValueError) as e:
+            if LIMIT_RE.search(out[-3000:]) and limits < cfg_int("LLM_LIMIT_RETRIES", 6):
+                limits += 1
+                wait = float(cfg("LLM_LIMIT_WAIT_S", "300")) * limits
+                log(f"{step}: model limit ({LIMIT_RE.search(out[-3000:]).group(0)}); waiting {wait:.0f}s, try {limits}")
+                time.sleep(wait)
+                sid, msg = str(uuid.uuid4()), body      # a limited call did no work: start it again
+                continue
+            attempt += 1
             log(f"{step}: attempt {attempt} left no valid answer ({e})")
-            body += f"\n\nYour previous attempt did not leave a valid answer at {out_path} ({e}). Write it now."
+            fix = (f"Your answer is not at {out_path} or does not parse ({e}). Write {what} to {out_path} now, "
+                   f"then reply DONE.")
+            msg = fix if cli == "claude" else body + "\n\n" + fix
     return None
 
 
@@ -263,6 +283,8 @@ def coverage(cid, d, rep):
     blocked = [s for s in planned if st.get(s) == "blocked"]
     missing = [s for s in planned if st.get(s) in (None, "not_run")]
     score = round(100 * len(ran) / len(planned)) if planned else 0
+    if planned and not (set(st) & set(planned)) and st:
+        log(f"{cid} d{d}: the report's scenario ids ({', '.join(list(st)[:5])}) match none of the plan's; coverage reads 0")
     return score, ran, blocked, missing
 
 
@@ -285,9 +307,13 @@ def precheck(cid, d, rep):
         elif not real:
             why = "evidence files missing or empty: " + ", ".join(os.path.basename(p) for p in shots[:3])
         else:
-            dup = next((n for n, t in filed if similar(title, t) >= 0.6), None)
-            rep_ = next((t for t in earlier if similar(title, t) >= 0.6), None)
-            twin = next((t for t in seen if similar(title, t) >= 0.8), None)
+            # near-identical titles are rejected here; merely similar ones go to the judge with a note, since two
+            # different bugs on one screen often share most of their words
+            dup = next((n for n, t in filed if similar(title, t) >= 0.8), None)
+            rep_ = next((t for t in earlier if similar(title, t) >= 0.8), None)
+            twin = next((t for t in seen if similar(title, t) >= 0.85), None)
+            maybe = next((f"filed {n}: {t}" for n, t in filed if similar(title, t) >= 0.5), None) or \
+                next((f"day-earlier bug: {t}" for t in earlier if similar(title, t) >= 0.5), None)
             if dup:
                 why = f"already filed as {dup}"
             elif rep_:
@@ -297,7 +323,7 @@ def precheck(cid, d, rep):
         if why:
             rejected.append({"id": f.get("id"), "title": title, "reason": why, "by": "code"})
         else:
-            keep.append({**f, "screenshots": real})
+            keep.append({**f, "screenshots": real, **({"possible_duplicate": maybe} if maybe else {})})
             seen.append(title)
     return keep, rejected
 
@@ -315,9 +341,13 @@ def judge(cid, d):
         subprocess.run(["python3", os.path.join(SCRIPTS, "judge-pack.py"), RUN, cid, str(d)], capture_output=True)
         out = os.path.join(rd, "judge-answer.json")
         ids = ", ".join(str(f.get("id")) for f in keep)
+        dupes = "".join(f"Finding {f['id']} may repeat {f['possible_duplicate']}. Reject it as a duplicate if it is the same "
+                        f"bug; keep it if the screen, the cause or the symptom differs.\n"
+                        for f in keep if f.get("possible_duplicate"))
         ans = llm(f"judge:{cid}:d{d}", f"""You check the findings of character "{cid}", day {d}, in a crowd QA run.
 Read {rd}/judge-pack.md (scenarios, findings with downscaled screenshots, square posts, end of the tester log)
 and {lane_dir(cid)}/card.md. Check only these findings: {ids}. Source: {cfg('SOURCE_PATHS')}.
+{dupes}
 For each: open its screenshots and decide whether they show the claim. Open the cited file:line (sed -n, 40 lines
 or less) to confirm the cause; if none is cited, at most 3 targeted lookups, else mechanism = "not confirmed".
 Reject: evidence that does not show the claim, speculation, intended behaviour (per {RUN}/context.md and the
@@ -331,7 +361,7 @@ why, or not confirmed>", "voice": "<the tester's in-character line, one or two p
                   cfg("JUDGE_MODEL", "opus"), cfg("JUDGE_EFFORT", "medium"), out, ("findings",))
         byid = {str(f.get("id")): f for f in keep}
         if ans is None:
-            rejected += [{"id": f.get("id"), "title": f.get("title"), "reason": "judge failed twice", "by": "code"} for f in keep]
+            raise RuntimeError(f"judge for {cid} day {d} gave no valid answer; no verdict written, the next run judges it again")
         else:
             in_char, notes = ans.get("in_character"), ans.get("notes", "")
             answered = set()
@@ -449,9 +479,9 @@ def run():
             try:
                 futs.pop(k).result()
                 st[k] = "judged"
-            except Exception as e:  # a judge crash must not stop the crowd
+            except Exception as e:  # a judge crash must not stop the crowd; the day is judged again on the next run
                 log(f"judge {k}: {e}")
-                st[k] = "judged"
+                st[k] = "failed"
         down = os.path.exists(os.path.join(RUN, "STACK_DOWN"))
         if down and time.time() - last_down_note > 1800:
             log(f"STACK_DOWN ({read(os.path.join(RUN, 'STACK_DOWN')).strip()}): no character starts until the health checks pass")
@@ -468,6 +498,9 @@ def run():
                     continue        # tomorrow starts once yesterday is judged: its prompt carries the verdict
                 if any(st[(p, d)] not in ("ran", "judging") + finished for p in deps[c["id"]]):
                     continue        # a dependent waits for its provider's run that day, not for its judge
+                gone = [p for p in deps[c["id"]] if st[(p, d)] in ("skipped", "failed")]
+                if gone:
+                    log(f"{c['id']} d{d}: starts although {', '.join(gone)} did not run that day; expect blocked scenarios")
                 rd = round_dir(*k)
                 os.makedirs(rd, exist_ok=True)
                 procs[k] = subprocess.Popen(["bash", os.path.join(SCRIPTS, "run-tester.sh"), RUN, c["id"], str(d)],
@@ -513,6 +546,9 @@ def dedupe():
                 ambiguous.append((i, j))   # the same bug seen on another surface (web and API) has another route
     if ambiguous and cfg("DEDUPE_LLM", "1") == "1":
         out = os.path.join(RUN, "state", "dedupe-answer.json")
+        if len(ambiguous) > 200:
+            ambiguous.sort(key=lambda ij: -similar(found[ij[0]]["title"], found[ij[1]]["title"]))
+            log(f"dedupe: {len(ambiguous)} look-alike pairs; the model checks the 200 most similar, the rest stay separate")
         pairs = [{"pair": k, "a": found[i]["title"], "b": found[j]["title"], "route": found[i].get("route"),
                   "a_actual": found[i].get("actual", "")[:300], "b_actual": found[j].get("actual", "")[:300]}
                  for k, (i, j) in enumerate(ambiguous[:200])]
@@ -693,6 +729,12 @@ def file_issues():
             urls = push_evidence(key, repo, mine)
 
         def one(x):
+            if not hook:
+                r = sh(["gh", "issue", "list", "-R", repo, "--state", "all", "--search", f'"{x["title"]}" in:title',
+                        "--limit", "5", "--json", "number,title,url"])
+                same = next((i for i in (jload_str(r.stdout) or []) if i.get("title", "").strip().lower() == x["title"].strip().lower()), None)
+                if same:
+                    return x, same.get("url") or f"https://github.com/{repo}/issues/{same['number']}", "already open with this title"
             v = verify(x, repo)
             if v and v.get("verdict") == "repair":
                 fix = [p for p in v.get("repair_screenshots", []) if os.path.isfile(p)]
@@ -704,8 +746,10 @@ def file_issues():
                     v = verify(x, repo, 2)
                     if v and v.get("verdict") == "repair":
                         v = {"verdict": "refuse", "reason": "evidence still does not show the claim after repair"}
-            if not v or v.get("verdict") != "file":
-                return x, None, (v or {}).get("reason", "verifier failed")
+            if not v:
+                return x, None, "error: the bug check gave no valid answer"
+            if v.get("verdict") != "file":
+                return x, None, v.get("reason", "refused")
             x["likely_cause"] = v.get("likely_cause")
             body = render_body(x, urls.get(x["key"], []))
             bf = os.path.join(RUN, "state", f"issue-{x['key']}.md")
@@ -723,7 +767,7 @@ def file_issues():
                 if url and sh(["gh", "issue", "view", url, "--json", "number"]).returncode:
                     url = ""
             if not url:
-                return x, None, f"filing command returned no URL: {r.stderr.strip()[:200]}"
+                return x, None, f"error: filing returned no URL: {r.stderr.strip()[:200]}"
             return x, url, ""
 
         with cf.ThreadPoolExecutor(cfg_int("FILE_PARALLEL", 6)) as ex:
@@ -735,6 +779,8 @@ def file_issues():
                         with open(os.path.join(RUN, "filed.txt"), "a") as f:
                             f.write(f"{'#' + num.group(1) if num else url} {x['title']}\n")
                         log(f"filed {url} {x['title']}")
+                    elif why.startswith("error:"):
+                        log(f"not filed yet: {x['title']} ({why}); the next run tries again")
                     else:
                         refused[x["key"]] = {"title": x["title"], "reason": why}
                         log(f"not filed: {x['title']} ({why})")
@@ -766,9 +812,15 @@ def report():
              "", "## Refused at filing",
              *[f"- {v['title']}: {v['reason']}" for v in jload(os.path.join(RUN, "state", "refused.json"), {}).values()]]
     pp = os.path.join(RUN, "state", "report-pack.md")
+    text_ = "\n".join(pack) + "\n"
+    sig = hashlib.sha1((text_ + read(os.path.join(RUN, "square", "feed.jsonl"))).encode()).hexdigest()
+    sp = os.path.join(RUN, "state", "report.sig")
+    if os.path.exists(out) and read(sp).strip() == sig:
+        log("report: nothing changed since the last report; not rewritten")
+        return
     with open(pp, "w") as f:
-        f.write("\n".join(pack) + "\n")
-    llm("report", f"""Write the launch-readiness report for this crowd QA run, grounded only in evidence.
+        f.write(text_)
+    ok = llm("report", f"""Write the launch-readiness report for this crowd QA run, grounded only in evidence.
 Read {pp} (coverage, what was filed and refused, who was never tested), every {RUN}/lanes/*/card.md and memory.md,
 and the square (python3 {SCRIPTS}/square.py {RUN} digest nobody --limit 300).
 Sections: a verdict line (would these {len(characters())} people keep using the product after launch week, and
@@ -776,10 +828,35 @@ why); one short section per group of people (by role and need), with who got wha
 where, and the issues that blocked them (linked); the three things to fix before launch, by how many people they
 hurt; what nobody could test and why. Quote characters sparingly. Plain prose, no hype words, no closing summary.""",
         cfg("REPORT_MODEL", "opus"), cfg("REPORT_EFFORT", "medium"), out, text=True)
+    if ok:
+        with open(sp, "w") as f:
+            f.write(sig)
     log(f"report: {out}")
 
 
 # --------------------------------------------------------------------------------------------------- status
+PRICE = {"opus": (4, 20), "sonnet": (2, 10), "haiku": (0.1, 0.5)}   # $ per million tokens in / out
+
+
+def tester_spend():
+    """Claude tester spend, read from each session's transcript (every chunk's session id is kept). Estimate:
+    cache reads at 0.1x input, cache writes at 1.25x. Codex testers run on a subscription and are not priced."""
+    usd, seen = 0.0, set()
+    for sf in glob.glob(os.path.join(RUN, "lanes", "*", "round*", "claude-session*")):
+        for sid in set(read(sf).split()):
+            for tp in glob.glob(os.path.expanduser(f"~/.claude/projects/*/{sid}.jsonl")):
+                for line in read(tp).splitlines():
+                    m = jload_str(line).get("message") or {}
+                    u, mid = m.get("usage"), m.get("id")
+                    if not u or mid in seen:
+                        continue
+                    seen.add(mid)
+                    pin, pout = next((v for k, v in PRICE.items() if k in (m.get("model") or "")), PRICE["sonnet"])
+                    usd += (u.get("input_tokens", 0) * pin + u.get("cache_read_input_tokens", 0) * pin * 0.1 +
+                            u.get("cache_creation_input_tokens", 0) * pin * 1.25 + u.get("output_tokens", 0) * pout) / 1e6
+    return usd
+
+
 def status():
     st = jload(os.path.join(RUN, "state", "crowd-state.json"), {})
     counts = {}
@@ -788,7 +865,9 @@ def status():
     usd = 0.0
     for line in read(os.path.join(RUN, "state", "costs.jsonl")).splitlines():
         usd += float(jload_str(line).get("usd") or 0)
-    print(f"character-days: {counts or '(not started)'}; model spend outside testers: ${usd:.2f}")
+    tu = tester_spend()
+    print(f"character-days: {counts or '(not started)'}; model steps ${usd:.2f}; Claude testers ${tu:.2f} (est.); "
+          f"total ${usd + tu:.2f}", flush=True)
     for k in ["STACK_DOWN", "TESTER_FALLBACK"] + [os.path.basename(p) for p in glob.glob(os.path.join(RUN, "QUOTA_PAUSE.*"))
                                                  if "lifted" not in p]:
         if os.path.exists(os.path.join(RUN, k)):

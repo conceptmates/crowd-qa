@@ -41,3 +41,8 @@ new machine.
 | Every bug re-checked on the top model before filing | 3.9% refused; three real bugs refused only for a mislabelled screenshot | Sonnet checks, the top model only for high severity or unconfirmed causes; wrong screenshots are repaired |
 | Customers waited for the business owner's day to be judged | 8 of 17 businesses never got a customer | Dependents wait for the provider's run, not its judge; days do not wait for each other |
 | Testers slept a fixed time after every action | A third of tester wall time | The brief asks for waits on elements |
+| A model step hit a rate or usage limit | It failed twice in seconds; a failed judge would have rejected the day's bugs | `crowd.py` waits and retries on limits (`LLM_LIMIT_WAIT_S`); a judge with no answer leaves no verdict, so the next run judges that day again |
+| A step's answer did not parse | The retry paid for the whole task again | The retry resumes the same session and asks only for the answer |
+| `gh issue create` failed once | The bug was recorded as refused for good | Filing errors are retried on the next run; an issue with the same title already open is linked, not filed again |
+| Code rejected findings at 60% word overlap with a filed issue | Different bugs on one screen share most of their words | Code rejects only near-identical titles; similar ones go to the judge with a note |
+| The launch report was rewritten on every rerun | One Opus call each time for the same text | Rewritten only when coverage, filing or the square changed |
