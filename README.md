@@ -8,8 +8,6 @@ source, and what holds up is filed.
 The run loop is code (`scripts/crowd.py`). A model is called only to write the product map and the plans, to
 check a day's findings, to check a bug before filing, and to write the launch report.
 
-> `skills/crowd-qa/SKILL.md` is not in the repo yet. Until it is, `npx skills add` finds nothing to install;
-> the scripts, templates, references and the worked example below are complete.
 
 ## Install
 
