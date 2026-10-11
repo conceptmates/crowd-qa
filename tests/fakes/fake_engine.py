@@ -5,7 +5,10 @@ No model is called and nothing leaves the machine. Every call is appended to $FA
 Model steps (prompts that start with "[crowd-qa step=... out=...]") write a canned answer to the out path.
 Tester runs (prompts with "## Your assignment") write report.json and screenshots for today's scenarios, driven by
 $RUN/fake-tester.json: {"<lane>": {"findings": [{"title", "severity", "shots": "ok|none|missing"}],
-"budget_first": true, "limit_first": true, "sleep": 2, "die": true}}.
+"budget_first": true, "limit_first": true, "switch_first": true, "sleep": 2, "die": true}}.
+Also `ssh` (prints $FAKE_SSH_OUT), and the one-word test calls of preflight and quota-guard: the active caam profile
+(from $FAKE_CAAM, or CAAM_PROFILE under `caam exec`) refuses when "<profile>:<model>" is in $FAKE_CODEX_REFUSE, or
+when the Claude profile is in $FAKE_CLAUDE_REFUSE.
 """
 import json
 import os
@@ -46,6 +49,10 @@ def tester(prompt):
     record("tester", engine=NAME, prompt_bytes=len(prompt))
     if conf.get("sleep"):
         time.sleep(conf["sleep"])
+    if conf.get("switch_first") and once("switch"):
+        # quota-guard switched the account mid-day and stopped this tester (SIGTERM)
+        open(os.path.join(run, ".engine-switched"), "w").close()
+        sys.exit(143)
     if conf.get("die") and once("die"):
         # kill the runner: our parent is `timeout`, its parent is run-tester.sh
         runner = subprocess.run(["ps", "-o", "ppid=", "-p", str(os.getppid())], capture_output=True, text=True).stdout.strip()
@@ -141,8 +148,41 @@ def model_step(prompt, resumed=False):
     print(json.dumps({"total_cost_usd": 0.01, "num_turns": 2, "result": "DONE"}))
 
 
+def active_profile(tool):
+    if os.environ.get("CAAM_PROFILE"):
+        return os.environ["CAAM_PROFILE"]
+    try:
+        return json.load(open(os.environ["FAKE_CAAM"]))[tool]["active"]
+    except (KeyError, OSError, ValueError):
+        return ""
+
+
 def main():
     if NAME == "agent-browser":
+        return
+    if NAME == "ssh":
+        record("ssh")
+        print(os.environ.get("FAKE_SSH_OUT", ""))
+        return
+    if NAME == "codex" and "--version" in ARGS:
+        print("fake-codex 1.0")
+        return
+    if NAME == "codex" and any("single word ok" in a for a in ARGS):
+        model = ARGS[ARGS.index("-m") + 1] if "-m" in ARGS else "default"
+        prof = active_profile("codex")
+        record("probe", profile=prof, model=model)
+        if f"{prof}:{model}" in os.environ.get("FAKE_CODEX_REFUSE", "").split(","):
+            print(f"ERROR: The '{model}' model is not supported when using Codex with a ChatGPT account.")
+            sys.exit(1)
+        print("ok")
+        return
+    if NAME == "claude" and any("single word ok" in a for a in ARGS):
+        prof = active_profile("claude")
+        record("probe", profile=prof)
+        if prof in os.environ.get("FAKE_CLAUDE_REFUSE", "").split(","):
+            print("Claude AI usage limit reached")
+            sys.exit(1)
+        print("ok")
         return
     if NAME == "gh":
         record("gh")
