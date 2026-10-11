@@ -23,10 +23,15 @@ decides from these files alone, so continuing is the same command as starting.
 | `TESTER_FALLBACK` | run-tester.sh | an engine hit its limit (`from=<engine>`); its characters use the fallback until it expires |
 | `QUOTA_PAUSE.<engine>` | run-tester.sh | that engine is out and has no fallback; crowd.py lifts it after RETRY_PRIMARY_MIN |
 | `STACK_DOWN` | api-watch.sh | the stack failed its checks; nothing starts and testers hold until it is gone |
+| `lanes/<id>/days`, `scenarios.unsplit.md` | crowd.py plan | a day longer than SCEN_MAX was split; the character runs this many days |
+| `.browsers/` | browser-pool.sh, remote-browser.sh | browser slot holders (`remote-N`, `local-N`: lane, pid), extra browsers, CDP forwards |
+| `.engine-switched` | quota-guard.sh | an account switch stopped testers; runners resume the same session |
+| `quota.log`, `logs/quota-guard.pid` | quota-guard.sh | every account reading and switch, pause, fallback |
+| `DONE` with `exit=retry` | run-tester.sh | the day never started testing (its browser failed); crowd.py queues it again |
 
 ## Procedure (after a reboot, a stopped session, or "continue")
 
-1. `bash <run>/scripts/resume.sh <run>`: restarts the watchers, runs the watchdog once (stack up, data
+1. `bash <run>/scripts/resume.sh <run>`: restarts the watchers (quota-guard included), runs the watchdog once (stack up, data
    restored), runs the stack check, saves state, and starts `crowd.py <run> all` unless it is still running.
 2. `python3 <run>/scripts/crowd.py <run> status`: where every character-day stands and what the model steps
    have cost.

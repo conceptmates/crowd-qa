@@ -13,6 +13,10 @@
 #               name answers, and so does LLM_CLI, which crowd.py uses to plan, judge, verify and report
 #   watchers  — api-watch and the state saver are running, so an outage holds the crowd and state is on disk
 #   leftovers — runners still alive from an earlier crowd.py are reported (crowd.py waits for them)
+#   browsers  — remote slots: remote-chrome.sh installed on REMOTE_HOST and a Chromium there; no CDP port of ours
+#               already taken here by another session; one spare slot for second-user browsers
+#   accounts  — every CODEX_ACCOUNTS / CLAUDE_ACCOUNTS profile exists in caam, quota-guard running, and every Codex
+#               account accepts the tester model (a 'go' plan refused the default model; 12 days ran with no evidence)
 set -u
 RUN="$1"; . "$RUN/config.env"
 fail=0
@@ -67,6 +71,79 @@ engines=$( { echo "${TESTER:-claude}" "${FALLBACK_TESTER:-}" "${LLM_CLI:-claude}
 for t in $engines; do
   command -v "$t" >/dev/null && ok "engine CLI: $t $($t --version 2>&1 | head -1)" || bad "engine CLI $t missing"
 done
+# --- browser slots (references/remote-stack.md) -----------------------------------------------------------
+nremote=$(echo "${BROWSER_SLOTS:-}" | tr ' ' '\n' | grep -c '^remote:')
+if [ "$nremote" -gt 0 ]; then
+  RCP="${REMOTE_CHROME:-~/crowd-qa/remote-chrome.sh}"
+  if [ -z "${REMOTE_HOST:-}" ]; then bad "BROWSER_SLOTS has remote slots but REMOTE_HOST is empty"
+  elif ssh -o BatchMode=yes -o ConnectTimeout=8 "$REMOTE_HOST" "mkdir -p \$(dirname $RCP) && cat > $RCP && chmod +x $RCP" < "$RUN/scripts/remote-chrome.sh" 2>/dev/null \
+       && rc_out=$(ssh -o BatchMode=yes -o ConnectTimeout=8 "$REMOTE_HOST" "$RCP check" 2>&1); then
+    ok "remote browsers: remote-chrome.sh installed on $REMOTE_HOST ($rc_out)"
+  else bad "remote browsers: could not install or run $RCP on $REMOTE_HOST (${rc_out:-ssh failed})"; fi
+  for s in $(echo "$BROWSER_SLOTS" | tr ' ' '\n' | grep '^remote:'); do
+    p=$(( ${REMOTE_CDP_BASE:-9320} + ${s#remote:} ))
+    if python3 -c "import socket,sys;s=socket.socket();s.settimeout(1);sys.exit(0 if s.connect_ex(('127.0.0.1',$p))==0 else 1)" \
+       && ! { [ -f "$RUN/.browsers/port-$p.pid" ] && kill -0 "$(cat "$RUN/.browsers/port-$p.pid")" 2>/dev/null; }; then
+      bad "port $p (slot $s) already listens here: another session uses it; change REMOTE_CDP_BASE or stop that session"
+    fi
+  done
+  nweb=$(sed -n 's/^- \*\*Surface\*\*: *//p' "$RUN"/lanes/*/card.md 2>/dev/null | grep -c '^web')
+  need=$(( nweb < ${HARD_CAP:-4} ? nweb : ${HARD_CAP:-4} ))
+  [ "$nremote" -le "$need" ] && echo "NOTE  $nremote remote browser slot(s) for up to $need web characters at once: add one spare slot, or a tester who needs a second signed-in user waits for a whole day to end"
+fi
+
+# --- accounts (quota-guard.sh through caam) ------------------------------------------------------------------
+if [ -n "${CODEX_ACCOUNTS:-}${CLAUDE_ACCOUNTS:-}" ]; then
+  if command -v "${CAAM:-caam}" >/dev/null; then
+    for t in codex claude; do
+      acc=$(eval echo "\${$(echo $t | tr a-z A-Z)_ACCOUNTS:-}"); [ -z "$acc" ] && continue
+      have=$(${CAAM:-caam} ls "$t" 2>/dev/null | awk '{print ($1=="●" ? $2 : $1)}')
+      for a in $acc; do echo "$have" | grep -qx "$a" || bad "caam has no $t profile '$a' (CODEX_ACCOUNTS/CLAUDE_ACCOUNTS)"; done
+    done
+    pgrep -f "quota-guard.sh $RUN" >/dev/null && ok "quota-guard running (only it switches accounts during the run)" \
+      || bad "quota-guard not running: bash $RUN/scripts/restart-watchers.sh $RUN"
+  else bad "CODEX_ACCOUNTS/CLAUDE_ACCOUNTS set but caam is not installed"; fi
+fi
+
+# --- every Codex account accepts the model (a ChatGPT 'go' plan refused the default model: 12 character-days ran
+#     with no evidence). Tested per account without a machine-wide switch when caam has an isolated profile for it.
+uses_codex=""
+{ [ "${TESTER:-}" = codex ] || [ "${FALLBACK_TESTER:-}" = codex ] || grep -qi '^- \*\*Engine\*\*: *codex' "$RUN"/lanes/*/card.md 2>/dev/null; } && uses_codex=1
+if [ -n "$uses_codex" ] && [ -n "${CODEX_ACCOUNTS:-}" ] && command -v "${CAAM:-caam}" >/dev/null; then
+  models=$( { [ "${TESTER:-}" = codex ] && echo "${TESTER_MODEL:-default}"
+              [ "${FALLBACK_TESTER:-}" = codex ] && echo "${FALLBACK_MODEL:-default}"
+              grep -qi '^- \*\*Engine\*\*: *codex' "$RUN"/lanes/*/card.md 2>/dev/null && echo "${CODEX_MODEL:-default}"; } | sort -u)
+  isolated=$(${CAAM:-caam} profile ls codex 2>/dev/null | awk 'NF{print ($1=="●" ? $2 : $1)}')
+  switch_ok=""
+  if [ "${PREFLIGHT_MODEL_PROBE:-}" = switch ]; then
+    if pgrep -f "run-tester.sh $RUN " >/dev/null || pgrep -f "crowd.py $RUN" >/dev/null; then
+      bad "PREFLIGHT_MODEL_PROBE=switch refused: testers or crowd.py are running and a caam switch would move them"
+    else switch_ok=1; orig=$(${CAAM:-caam} ls codex 2>/dev/null | awk '$1=="●"{print $2}'); fi
+  fi
+  for a in $CODEX_ACCOUNTS; do
+    for m in $models; do
+      mm=""; [ "$m" != default ] && mm="$m"
+      if echo "$isolated" | grep -qx "$a"; then
+        out=$(cd /tmp && timeout 180 ${CAAM:-caam} exec codex "$a" -- exec --skip-git-repo-check ${mm:+-m "$mm"} "Reply with the single word ok" 2>&1)
+      elif [ -n "$switch_ok" ]; then
+        ${CAAM:-caam} activate codex "$a" >/dev/null 2>&1
+        out=$(cd /tmp && timeout 180 codex exec --skip-git-repo-check ${mm:+-m "$mm"} "Reply with the single word ok" 2>&1)
+      else
+        plan=$(${CAAM:-caam} ls codex --json 2>/dev/null | python3 -c "import json,sys
+d=json.load(sys.stdin); print(next(((p.get('identity') or {}).get('plan_type','?') for p in d.get('profiles',[]) if p.get('name')=='$a'),'?'))" 2>/dev/null)
+        case "$plan" in
+          go|free) bad "codex account $a is on a ChatGPT '$plan' plan, which refused the default model in a real run: prove model $m with PREFLIGHT_MODEL_PROBE=switch (switches accounts while nothing runs) or an isolated profile (caam profile add codex $a), pin a model it accepts, or drop it from CODEX_ACCOUNTS" ;;
+          *) echo "NOTE  codex account $a ($plan plan): model $m not tested (no isolated caam profile; PREFLIGHT_MODEL_PROBE=switch tests it). Pin TESTER_MODEL/CODEX_MODEL to a model every account accepts" ;;
+        esac
+        continue
+      fi
+      if echo "$out" | tail -5 | grep -qiw ok; then ok "codex account $a accepts model $m"
+      else bad "codex account $a refuses model $m: $(echo "$out" | grep -iE 'error|not supported|model' | tail -1 | cut -c1-160)"; fi
+    done
+  done
+  [ -n "$switch_ok" ] && [ -n "$orig" ] && ${CAAM:-caam} activate codex "$orig" >/dev/null 2>&1
+fi
+
 pgrep -f "state-saver.sh $RUN" >/dev/null && ok "state saver running" || bad "state saver not running: bash $RUN/scripts/restart-watchers.sh $RUN"
 if [ -n "${HEALTH_CHECKS:-}" ]; then
   pgrep -f "api-watch.sh $RUN" >/dev/null && ok "api-watch running" || bad "api-watch not running: bash $RUN/scripts/restart-watchers.sh $RUN"

@@ -45,6 +45,13 @@ CLAUDE_EFFORT="medium"
 FALLBACK_TESTER=""              # takes over an engine that hit its usage limit; empty = pause instead
 FALLBACK_MODEL=""
 FALLBACK_EFFORT=""
+# quota-guard.sh (caam) rotates subscription accounts before a limit; only the guard switches accounts during a run
+CODEX_ACCOUNTS=""               # caam profile names in order, e.g. "work spare1 spare2"; empty = no rotation
+CLAUDE_ACCOUNTS=""
+PRIMARY_MAX=94; WEEKLY_MAX=95   # switch when the active account passes either % (5-hour window, week)
+SWITCH_HEADROOM=10              # switch only to an account at least this many points under both bars
+CODEX_NEAR_MAX=85               # with FALLBACK_TESTER: at this 5-hour % and no Codex account free, new days start on the fallback
+PREFLIGHT_MODEL_PROBE=""        # switch = preflight activates each Codex account in turn to prove it accepts the model
 RETRY_PRIMARY_MIN=60            # minutes before trying an engine again after a limit
 ROUND_TIMEOUT_S=7200            # one character-day at most this long
 CLAUDE_LEAN=1                   # claude testers and model steps start without user settings, hooks, MCP, skills
@@ -56,14 +63,15 @@ DAYS=2                          # simulated days per character
 # --- model steps run by crowd.py (everything else is code) -------------------------------------------
 LLM_CLI="claude"
 # Judgement steps run on Opus: a Sonnet bug check refused a real seeded bug in a dry run
-PLANNER_MODEL="opus";   PLANNER_EFFORT="medium"; MAP_EFFORT="high"
+PLANNER_MODEL="opus";   PLANNER_EFFORT="medium"; MAP_EFFORT="medium"   # a high-effort map cost \$41 of \$62 once
+PRODUCT_MAP_FROM=""             # a saved product-map.md to reuse; copied only when its source commits match SOURCE_PATHS
 JUDGE_MODEL="opus";     JUDGE_EFFORT="medium"
 VERIFY_MODEL="opus";    VERIFY_EFFORT="medium"
 ESCALATE_MODEL="opus";  ESCALATE_EFFORT="medium" # bugs of high severity or with an unconfirmed cause; "high" = deeper check
 REPORT_MODEL="opus";    REPORT_EFFORT="medium"
 SOURCE_PATHS=""                 # source the planners and judges may read, space-separated absolute paths
 RESEARCH_NOTES=""
-SCEN_MAX=20                     # scenarios per character per day
+SCEN_MAX=12                     # scenarios per character-day; a longer day is split into more days (31-scenario days ended early)
 SATISFIED_PCT=90                # coverage (ran / planned, computed in code) that counts as a full day
 DESIGN_PARALLEL=5; JUDGE_PARALLEL=4; FILE_PARALLEL=6
 POLL_S=20                       # crowd.py checks runners this often
@@ -76,6 +84,13 @@ MIN_FREE_PCT=15                 # never admit a character below this free-memory
 MAX_LOAD_PER_CORE=3
 SWAP_MAX_MB=4096                # never admit a character while more swap than this is in use
 DISK_MIN_GB=10                  # no character starts below this much free disk
+BROWSER_SLOTS=""                # web browsers: "remote:1 remote:2 ..." (Chromium on REMOTE_HOST) or "local:1 ..."; empty = no cap.
+                                #   Keep one slot more than HARD_CAP web characters, for second-user browsers
+REMOTE_MIN_FREE_MB=3000         # remote slots: no new Chromium below this MemAvailable on REMOTE_HOST (empty = no gate)
+REMOTE_MAX_LOAD_PER_CORE=3      # ... or at/above cores x this 1-min load (empty = no gate)
+REMOTE_CDP_BASE=9320            # remote:N uses CDP port REMOTE_CDP_BASE+N on both machines
+REMOTE_CHROME="~/crowd-qa/remote-chrome.sh"   # preflight installs scripts/remote-chrome.sh here on REMOTE_HOST
+REMOTE_UPLOADS="/tmp/crowd-uploads"           # upload files for remote browsers, on REMOTE_HOST
 
 # --- the stack ----------------------------------------------------------------------------------------
 STACK_MODE="local"              # local | remote (backend on REMOTE_HOST behind tunnel.sh)
