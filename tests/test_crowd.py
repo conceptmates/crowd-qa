@@ -26,17 +26,18 @@ BIN = os.path.join(WORK, "bin")
 
 def setUpModule():
     os.makedirs(BIN, exist_ok=True)
-    for n in ("claude", "codex", "gh", "git", "agent-browser"):
+    for n in ("claude", "codex", "gh", "git", "agent-browser", "ssh", "caam"):
         p = os.path.join(BIN, n)
         if not os.path.lexists(p):
-            os.symlink(os.path.join(HERE, "fakes", "fake_engine.py"), p)
+            os.symlink(os.path.join(HERE, "fakes", "fake_caam.py" if n == "caam" else "fake_engine.py"), p)
 
 
 class Run:
     def __init__(self, name, lanes, config="", tester=None, plans=True, cards=None):
         self.dir = os.path.join(WORK, name)
         shutil.rmtree(self.dir, ignore_errors=True)
-        self.env = {**os.environ, "PATH": BIN + ":" + os.environ["PATH"], "FAKE_LOG": os.path.join(self.dir, "fake.jsonl")}
+        self.env = {**os.environ, "PATH": BIN + ":" + os.environ["PATH"], "FAKE_LOG": os.path.join(self.dir, "fake.jsonl"),
+                    "FAKE_CAAM": os.path.join(self.dir, "caam.json")}
         subprocess.run(["bash", os.path.join(SKILL, "scripts", "init-crowd.sh"), self.dir], check=True,
                        capture_output=True, env=self.env)
         R = self.dir
@@ -88,6 +89,16 @@ FILE_CMD="bash {R}/file-hook.sh" TRACKERS="" CHUNK_USD=5 ROUND_TIMEOUT_S=120
 
     def verdict(self, lane, d):
         return json.load(open(self.path("lanes", lane, f"round{d}", "verdict.json")))
+
+    def config(self, text):
+        with open(self.path("config.env"), "a") as f:
+            f.write(text + "\n")
+
+    def accounts(self, state):
+        json.dump(state, open(self.path("caam.json"), "w"))
+
+    def caam(self):
+        return json.load(open(self.path("caam.json")))
 
 
 def lanes(*ids, deps=None):
@@ -458,6 +469,293 @@ class Watchers(unittest.TestCase):
         res = r.sh("bash", r.path("scripts", "capacity.sh"), r.dir, "check")
         self.assertEqual(res.returncode, 1)
         self.assertIn("swap", res.stdout)
+
+
+def plan_text(days):
+    """days: {day: number of scenarios}"""
+    out, n = "", 0
+    for d, k in sorted(days.items()):
+        out += f"## Day {d}\n"
+        for _ in range(k):
+            n += 1
+            out += f"### S{n} — step {n}  [failure]\nSteps: x\n"
+    return out + "## Exhaustive sweep\n- every screen\n"
+
+
+class Browsers(unittest.TestCase):
+    """browser-pool.sh: slot accounting, shrinking BROWSER_SLOTS, ports another session holds, remote gates."""
+
+    def setUp(self):
+        self.r = Run(self._testMethodName[5:20], lanes("maya"), config=(
+            'BROWSER_SLOTS="remote:1 remote:2" REMOTE_HOST=fakehost REMOTE_MIN_FREE_MB="" REMOTE_MAX_LOAD_PER_CORE="" '
+            'REMOTE_CDP_BASE=47320 BROWSER_POLL_S=0.2'))
+        self.holders = []
+
+    def tearDown(self):
+        for h in self.holders:
+            h.poll() is None and h.kill()
+
+    def holder(self):
+        h = subprocess.Popen(["sleep", "120"])
+        self.holders.append(h)
+        return h
+
+    def acquire(self, lane, holder, timeout=8):
+        try:
+            res = self.r.sh("bash", self.r.path("scripts", "browser-pool.sh"), self.r.dir, "acquire", lane, str(holder.pid),
+                            timeout=timeout)
+            return res.stdout.strip().splitlines()[-1]
+        except subprocess.TimeoutExpired:
+            return None
+
+    def release(self, lane):
+        self.r.sh("bash", self.r.path("scripts", "browser-pool.sh"), self.r.dir, "release", lane)
+
+    def test_slots_are_counted_and_a_dead_holder_frees_its_slot(self):
+        a, b = self.holder(), self.holder()
+        self.assertEqual(self.acquire("ana", a), "remote:1")
+        self.assertEqual(self.acquire("ben", b), "remote:2")
+        self.assertIsNone(self.acquire("cai", self.holder(), timeout=2), "two slots, two live browsers: the third waits")
+        self.assertIn("[cai] WAIT browser", self.r.read("capacity.log"))
+        a.kill()
+        a.wait()
+        self.assertEqual(self.acquire("cai", self.holder()), "remote:1")
+
+    def test_shrinking_the_slots_applies_while_old_holders_still_run(self):
+        self.r.config('BROWSER_SLOTS="remote:1 remote:2 remote:3"')
+        for lane in ("ana", "ben", "cai"):
+            self.acquire(lane, self.holder())
+        self.r.config('BROWSER_SLOTS="remote:1 remote:2"')
+        self.release("ana")
+        self.assertIsNone(self.acquire("dan", self.holder(), timeout=2), "ben and cai still hold 2 of the 2 slots now allowed")
+        self.assertIn("all 2 remote browsers busy", self.r.read("capacity.log"))
+        listing = self.r.sh("bash", self.r.path("scripts", "browser-pool.sh"), self.r.dir, "list").stdout
+        self.assertIn("remote:3 cai (removed from BROWSER_SLOTS)", listing)
+        self.release("ben")
+        self.assertIn(self.acquire("dan", self.holder()), ("remote:1", "remote:2"))
+
+    def test_a_port_another_session_holds_is_skipped_and_never_forwarded(self):
+        import socket
+        busy = socket.socket()
+        busy.bind(("127.0.0.1", 47321))
+        busy.listen()
+        self.addCleanup(busy.close)
+        self.assertEqual(self.acquire("ana", self.holder()), "remote:2")
+        self.assertIn("port 47321 already listens here", self.r.read("capacity.log"))
+        res = self.r.sh("bash", self.r.path("scripts", "remote-browser.sh"), self.r.dir, "start", "ana", "remote:1")
+        self.assertEqual(res.returncode, 3)
+        self.assertIn("refusing", res.stderr)
+        self.assertEqual(self.r.calls(kind="ssh"), [], "nothing was started on the remote for a busy port")
+
+    def test_remote_memory_gate_holds_new_browsers(self):
+        self.r.config("REMOTE_MIN_FREE_MB=3000")
+        self.r.env["FAKE_SSH_OUT"] = "8 1.0 1000"
+        self.assertIsNone(self.acquire("ana", self.holder(), timeout=2))
+        self.assertIn("remote free 1000MB < 3000MB", self.r.read("capacity.log"))
+        self.r.env["FAKE_SSH_OUT"] = "8 1.0 8000"
+        self.assertEqual(self.acquire("ana", self.holder()), "remote:1")
+
+    def test_local_slots_cap_local_browsers_and_extra_browsers_share_the_pool(self):
+        self.r.config('BROWSER_SLOTS="local:1 local:2"')
+        a = self.holder()
+        self.assertEqual(self.acquire("ana", a), "local:1")
+        self.r.env["RUNNER_PID"] = str(a.pid)     # the runner holds its tester's extra browser
+        res = self.r.sh("bash", self.r.path("scripts", "extra-browser.sh"), self.r.dir, "ana", "2")
+        self.assertEqual(res.stdout.strip(), "crowd-ana-2")
+        self.assertEqual(self.r.read(".browsers", "extra-ana-2").strip(), "local:2")
+        self.assertIsNone(self.acquire("ben", self.holder(), timeout=2), "the extra browser took the last slot")
+        self.release("ana")
+        self.assertEqual(self.acquire("ben", self.holder()), "local:1")
+
+
+class QuotaGuard(unittest.TestCase):
+    """quota-guard.sh decisions, with a fake caam: rotate, never act on a missing reading, pause, fall back."""
+
+    def guard(self, r):
+        res = r.sh("bash", r.path("scripts", "quota-guard.sh"), r.dir, "once")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return r.read("quota.log") if os.path.exists(r.path("quota.log")) else ""
+
+    def run_with(self, name, state, config=""):
+        r = Run(name, lanes("maya"), config="CLAUDE_ACCOUNTS=\"a b\" PRIMARY_MAX=94 WEEKLY_MAX=95 SWITCH_HEADROOM=10 " + config)
+        r.accounts(state)
+        return r
+
+    def activations(self, r):
+        return [c["args"][1:] for c in r.calls(kind="caam") if c["args"][0] == "activate"]
+
+    def test_no_reading_for_the_active_account_is_never_a_limit(self):
+        r = self.run_with("g-noread", {"claude": {"active": "a", "profiles": {
+            "a": {"p": "-", "w": "-"}, "b": {"p": "5", "w": "5"}}}})
+        self.assertIn("no reading for active a; keeping it", self.guard(r))
+        self.assertEqual(self.activations(r), [])
+        self.assertFalse(os.path.exists(r.path("QUOTA_PAUSE.claude")))
+        self.assertFalse(os.path.exists(r.path(".engine-switched")))
+
+    def test_an_account_over_the_bar_switches_to_the_first_with_headroom(self):
+        r = self.run_with("g-switch", {"claude": {"active": "a", "profiles": {
+            "a": {"p": "97", "w": "40"}, "b": {"p": "20", "w": "30"}}}})
+        self.assertIn("SWITCH claude a -> b", self.guard(r))
+        self.assertEqual(r.caam()["claude"]["active"], "b")
+        self.assertTrue(os.path.exists(r.path(".engine-switched")), "runners resume their session after a switch")
+
+    def test_every_account_near_its_limit_pauses_and_a_reset_lifts_it(self):
+        r = self.run_with("g-pause", {"claude": {"active": "a", "profiles": {
+            "a": {"p": "97", "w": "40"}, "b": {"p": "90", "w": "30"}}}})
+        r.env["FAKE_CLAUDE_REFUSE"] = "a,b"
+        self.assertIn("PAUSE claude", self.guard(r))
+        self.assertTrue(os.path.exists(r.path("QUOTA_PAUSE.claude")))
+        st = r.caam()
+        st["claude"]["profiles"]["b"]["p"] = "3"
+        r.accounts(st)
+        self.assertIn("RESUME claude on b", self.guard(r))
+        self.assertFalse(os.path.exists(r.path("QUOTA_PAUSE.claude")))
+        self.assertTrue(glob.glob(r.path("logs", "QUOTA_PAUSE.claude.lifted-*")))
+
+    def test_an_unread_claude_account_is_tried_with_one_small_call(self):
+        r = self.run_with("g-unread", {"claude": {"active": "a", "profiles": {
+            "a": {"p": "97", "w": "40"}, "b": {"p": "-", "w": "-", "st": "?"}}}})
+        self.assertIn("no reading for b, but a test call worked", self.guard(r))
+        self.assertEqual(r.caam()["claude"]["active"], "b")
+        r2 = self.run_with("g-unread2", {"claude": {"active": "a", "profiles": {
+            "a": {"p": "97", "w": "40"}, "b": {"p": "-", "w": "-", "st": "?"}}}})
+        r2.env["FAKE_CLAUDE_REFUSE"] = "b"
+        log = self.guard(r2)
+        self.assertIn("b refused a test call", log)
+        self.assertEqual(r2.caam()["claude"]["active"], "a", "switched back after the failed test call")
+        self.assertIn("PAUSE claude", log)
+
+    def test_codex_falls_back_instead_of_pausing_and_comes_back(self):
+        r = Run("g-codex", lanes("maya"), config='CODEX_ACCOUNTS="x y" FALLBACK_TESTER=claude CODEX_NEAR_MAX=85')
+        r.accounts({"codex": {"active": "x", "profiles": {"x": {"p": "88", "w": "20"}, "y": {"p": "100", "w": "50"}}}})
+        self.assertIn("FALLBACK codex", self.guard(r))
+        self.assertIn("by=guard", r.read("TESTER_FALLBACK"))
+        self.assertFalse(os.path.exists(r.path("QUOTA_PAUSE.codex")))
+        r.accounts({"codex": {"active": "x", "profiles": {"x": {"p": "88", "w": "20"}, "y": {"p": "2", "w": "5"}}}})
+        self.assertIn("SWITCH codex x -> y", self.guard(r))
+        self.assertFalse(os.path.exists(r.path("TESTER_FALLBACK")), "new days start on Codex again")
+
+    def test_a_guard_switch_resumes_the_same_tester_session(self):
+        r = Run("g-resume", lanes("hacker"), config="DAYS=1", tester={"hacker": {"switch_first": True}},
+                cards={"hacker": "- **Engine**: codex\n"})
+        res = r.crowd("run")
+        self.assertEqual(res.returncode, 0, res.stdout)
+        calls = r.calls(kind="tester", lane="hacker")
+        self.assertEqual(len(calls), 2)
+        sid = r.read("lanes", "hacker", "round1", "tester.log").split("session id: ")[1].split()[0]
+        self.assertEqual(calls[1]["args"][:3], ["exec", "resume", sid], "the same session continues, not a fresh one")
+        self.assertIn("stopped by quota-guard", r.read("lanes", "hacker", "round1", "resume.log"))
+        self.assertNotIn("## RESUME", r.read("lanes", "hacker", "round1", "prompt.md"), "the brief is not sent again")
+        self.assertEqual(r.read("lanes", "hacker", "round1", "DONE").strip(), "exit=0 engine=codex")
+
+
+class ModelCheck(unittest.TestCase):
+    def test_preflight_tests_every_codex_account_with_the_tester_model(self):
+        r = Run("modelcheck", lanes("maya"), config='TESTER=codex TESTER_MODEL=gpt-x CODEX_ACCOUNTS="a1 a2 a3"')
+        r.accounts({"codex": {"active": "a2", "profiles": {
+            "a1": {"plan": "go", "isolated": True}, "a2": {"plan": "plus", "isolated": True}, "a3": {"plan": "go"}}}})
+        r.env["FAKE_CODEX_REFUSE"] = "a1:gpt-x,a3:gpt-x"
+        out = r.sh("bash", r.path("scripts", "preflight.sh"), r.dir).stdout
+        self.assertIn("FAIL  codex account a1 refuses model gpt-x", out)
+        self.assertIn("PASS  codex account a2 accepts model gpt-x", out)
+        self.assertIn("FAIL  codex account a3 is on a ChatGPT 'go' plan", out)
+        self.assertEqual([c for c in r.calls(kind="caam") if c["args"][0] == "activate"], [],
+                         "isolated profiles are tested without a machine-wide switch")
+        r.config("PREFLIGHT_MODEL_PROBE=switch")
+        out = r.sh("bash", r.path("scripts", "preflight.sh"), r.dir).stdout
+        self.assertIn("FAIL  codex account a3 refuses model gpt-x", out)
+        self.assertEqual(r.caam()["codex"]["active"], "a2", "the original account is active again")
+
+
+class Plans(unittest.TestCase):
+    def test_a_day_longer_than_scen_max_is_split_into_sessions(self):
+        r = Run("split", lanes("maya"), config="DAYS=1 SCEN_MAX=2")
+        open(r.path("lanes", "maya", "scenarios.md"), "w").write(plan_text({1: 5}))
+        res = r.crowd("all")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        plan = r.read("lanes", "maya", "scenarios.md")
+        self.assertIn("## Day 3 (day 1, part 3 of 3)", plan)
+        self.assertEqual(r.read("lanes", "maya", "days").strip(), "3")
+        for d, ids in ((1, ["S1", "S2"]), (2, ["S3", "S4"]), (3, ["S5"])):
+            self.assertEqual(r.verdict("maya", d)["scenarios"]["ran"], ids)
+        p3 = r.read("lanes", "maya", "round3", "prompt.md")
+        self.assertIn("### S5", p3)
+        self.assertNotIn("### S1 ", p3)
+        self.assertTrue(os.path.exists(r.path("lanes", "maya", "scenarios.unsplit.md")))
+        self.assertIn("| maya | owner | 3 |", r.read("state", "report-pack.md"))
+
+    def test_a_saved_product_map_is_reused_only_for_the_same_source_commit(self):
+        repo = os.path.join(WORK, "maprepo")
+        shutil.rmtree(repo, ignore_errors=True)
+        os.makedirs(repo)
+        git = ["/usr/bin/git", "-C", repo, "-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run(git[:3] + ["init", "-q"], check=True)
+        open(os.path.join(repo, "a.txt"), "w").write("1")
+        subprocess.run(git + ["add", "."], check=True)
+        subprocess.run(git + ["commit", "-qm", "one"], check=True)
+        head = subprocess.run(git[:3] + ["rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        saved = os.path.join(WORK, f"saved-map-src-{head[:7]}.md")
+        open(saved, "w").write("# saved map\n" + "y" * 600)
+        r = Run("mapreuse", lanes("maya"), config=f'DAYS=1 SOURCE_PATHS="{repo}" PRODUCT_MAP_FROM="{saved}"')
+        os.remove(r.path("product-map.md"))
+        self.assertEqual(r.crowd("plan").returncode, 0)
+        self.assertEqual(r.read("product-map.md"), open(saved).read())
+        self.assertEqual([c for c in r.calls(kind="step") if c["step"] == "product-map"], [])
+        self.assertIn("source commits match", r.read("logs", "crowd.log"))
+        open(os.path.join(repo, "a.txt"), "w").write("2")
+        subprocess.run(git + ["commit", "-qam", "two"], check=True)
+        r2 = Run("mapstale", lanes("maya"), config=f'DAYS=1 SOURCE_PATHS="{repo}" PRODUCT_MAP_FROM="{saved}"')
+        os.remove(r2.path("product-map.md"))
+        self.assertEqual(r2.crowd("plan").returncode, 0)
+        self.assertEqual(len([c for c in r2.calls(kind="step") if c["step"] == "product-map"]), 1)
+        self.assertIn("written from other commits", r2.read("logs", "crowd.log"))
+        new_head = subprocess.run(git[:3] + ["rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        self.assertEqual(json.load(open(r2.path("product-map.md.src")))["commits"], {repo: new_head})
+
+
+class Makeup(unittest.TestCase):
+    def test_makeup_keeps_only_unfinished_scenarios_and_drops_ones_blocked_by_filed_bugs(self):
+        r = Run("makeup-old", lanes("maya", "leo", "done", deps={"leo": ["maya", "done"]}), config="SCEN_MAX=2")
+        for lane, d, statuses in (
+                ("maya", 1, {"S1": ("pass", ""), "S2": ("blocked", "refund fails, see #7"), "S3": ("blocked", "no ticket to scan")}),
+                ("maya", 2, {"S4": ("fail", ""), "S5": ("not_run", "ran out of time")}),
+                ("leo", 1, {"S1": ("blocked", "Export drops the last row of the CSV again"), "S2": ("pass", ""), "S3": ("pass", "")}),
+                ("leo", 2, {f"S{i}": ("pass", "") for i in (4, 5, 6)}),
+                ("done", 1, {f"S{i}": ("pass", "") for i in (1, 2, 3)}), ("done", 2, {f"S{i}": ("pass", "") for i in (4, 5, 6)})):
+            os.makedirs(r.path("lanes", lane, f"round{d}"), exist_ok=True)
+            json.dump({"scenarios": [{"id": k, "status": v[0], "notes": v[1]} for k, v in statuses.items()]},
+                      open(r.path("lanes", lane, f"round{d}", "report.json"), "w"))
+        open(r.path("lanes", "maya", "memory.md"), "w").write("Day 1: my password is CrowdQA!2026\n")
+        open(r.path("filed.txt"), "w").write("#7 Refund approval fails\n#9 Export drops the last row of the CSV\n")
+        new = os.path.join(WORK, "makeup-new")
+        shutil.rmtree(new, ignore_errors=True)
+        res = r.crowd("makeup", new)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        maya = open(os.path.join(new, "lanes", "maya", "scenarios.md")).read()
+        self.assertIn("### S1 — step 3  [failure]  (from day 1 S3)", maya)
+        self.assertIn("_Earlier: blocked. no ticket to scan_", maya)
+        self.assertIn("(from day 2 S5)", maya)
+        self.assertIn("(from day 2 S6)", maya, "planned but never reported")
+        self.assertIn("_Earlier: never reported._", maya)
+        self.assertNotIn("from day 1 S2", maya, "blocked by filed #7")
+        self.assertIn("## Day 2\n", maya, "three scenarios at SCEN_MAX=2 make two days")
+        self.assertFalse(os.path.exists(os.path.join(new, "lanes", "leo")), "leo's only gap is a filed bug")
+        self.assertFalse(os.path.exists(os.path.join(new, "lanes", "done")))
+        self.assertEqual(json.load(open(os.path.join(new, "lanes.json"))), [{"id": "maya", "role": "owner", "surface": "web", "depends_on": []}])
+        self.assertEqual(open(os.path.join(new, "filed.txt")).read(), r.read("filed.txt"))
+        self.assertIn("my password", open(os.path.join(new, "lanes", "maya", "memory.md")).read())
+        self.assertIn("**Name**: Maya", open(os.path.join(new, "lanes", "maya", "card.md")).read())
+        summary = json.load(open(os.path.join(new, "state", "makeup.json")))
+        self.assertEqual((summary["blocked"], summary["not_run"], summary["never reported"], summary["days"]), (1, 1, 1, 2))
+        self.assertEqual(len(summary["left_out_blocked_by_filed_bugs"]), 2)
+        conf = subprocess.run(["bash", "-c", f'. "{new}/config.env"; echo "$RUN_DIR $DAYS"'], capture_output=True, text=True).stdout
+        self.assertEqual(conf.strip(), f"{new} 2")
+        env = {**r.env, "FAKE_LOG": os.path.join(new, "fake.jsonl")}
+        shutil.copy(r.path("fake-tester.json"), os.path.join(new, "fake-tester.json"))
+        res = subprocess.run(["python3", os.path.join(new, "scripts", "crowd.py"), new, "run"], env=env,
+                             capture_output=True, text=True, timeout=180)
+        self.assertEqual(res.returncode, 0, res.stdout)
+        self.assertEqual(json.load(open(os.path.join(new, "lanes", "maya", "round1", "verdict.json")))["scenarios"]["ran"], ["S1", "S2"])
 
 
 if __name__ == "__main__":

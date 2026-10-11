@@ -45,3 +45,23 @@ where most of the earlier spend went.
 - Testers on the day-2 brief re-check their own day-1 bugs instead of reporting them again (the runner puts
   the list in the prompt). Codex repeated 10 of 12 bugs on day 2 before this rule.
 - Testers try for about 10 minutes before calling a scenario blocked.
+
+## Several accounts per engine (quota-guard.sh)
+With more than one subscription account per CLI, list the caam profiles in `CODEX_ACCOUNTS` and
+`CLAUDE_ACCOUNTS`, in order of preference. `restart-watchers.sh` then starts `quota-guard.sh`, which reads
+`caam limits` every 2 minutes and switches before a tester hits a limit (`PRIMARY_MAX`, `WEEKLY_MAX`,
+`SWITCH_HEADROOM`). A switched tester resumes its own session with a two-line message. With `FALLBACK_TESTER` set,
+Codex falls back instead of pausing when no Codex account is under `CODEX_NEAR_MAX`; new days return to Codex as
+soon as an account has room. Claude accounts caam cannot read are tried with one small call before a pause.
+`quota.log` holds every reading and decision.
+
+Rules:
+- **Only the guard switches accounts during a run.** `caam activate` is machine-wide: a Claude switch also moves
+  the orchestrating session and crowd.py's Opus steps. A hand switch while planners ran failed 29 calls and forced
+  6 replans.
+- **Every Codex account must accept the tester model.** A ChatGPT "go" plan refused the default model and 12
+  character-days ran with no evidence. `preflight.sh` makes a one-word call with each model on each account: through
+  an isolated caam profile (`caam profile add codex <name>`, no machine-wide switch), or, with
+  `PREFLIGHT_MODEL_PROBE=switch` and nothing running, by activating each account in turn and switching back.
+  Without either it fails accounts on a go or free plan and asks you to pin `TESTER_MODEL` / `CODEX_MODEL`.
+- "No reading" for the active account is never a limit (6 false pauses before that rule).

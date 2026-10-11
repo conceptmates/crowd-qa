@@ -22,7 +22,8 @@ made, and what annoyed you.
 ## Your surface: **$SURFACE**
 - **web**: `agent-browser` with session `$SESSION` (already set in the environment). Open `$APP_URL`.
   Set the viewport your card names (`agent-browser set viewport 390 844` for a phone) before anything else.
-  Need a second person signed in at the same time? Use session `$SESSION-2`. Never `close --all`.
+  Need a second person signed in at the same time? Run `bash $RUN/scripts/extra-browser.sh $RUN $LANE 2` and
+  use what it prints. Never `close --all`.
   A weak network, when your card asks for one: `agent-browser offline on`, wait 5-20 s, `agent-browser offline off`.
 - **ios / android**: your own device `$DEVICE`, app `$APP_ID` (installed; on day 1 a fresh install). Use the
   `agent-device` CLI (installed globally; never `npx -y agent-device`, which costs 1.4 s per call), the session
@@ -70,11 +71,22 @@ party account (CONNECT_CMD), messages from customers (`python3 $RUN/scripts/cust
 what the product sent out (OUTBOX_CMD) and your email inbox (MAIL_CMD). A popup or redirect to a real third
 party failing on this stack is expected: screenshot it, then use the hook.
 
+## Your own test data, and the other side of a scenario
+- If your card lists "Your own test data", use only that: nobody else has those codes, tickets or records, and
+  whatever you use up is yours to use up. Never use up or change data another character was given.
+- Dates and times mean the product's time zone (Run context says which), not UTC and not your machine's.
+- When a scenario needs someone else to act (an admin approves, staff scan your ticket, the seller replies), do it
+  with the act-as helper Run context names and quote its answer as evidence, then check what you see as yourself.
+  Do not wait on the square for a character who may not be running.
+
 ## Before you call a scenario "blocked"
-Spend up to about 10 minutes on it first: reload, sign in again, try another way to the same goal, and if you are
-waiting on another character, check `world.py get <their-id>` and the square every 2 minutes and post asking for
-it. Then mark it blocked and say in its notes exactly what you tried and what you were waiting for. A scenario you
-could have run is not blocked.
+Spend up to about 10 minutes on it first: reload, sign in again, try another way to the same goal, use the act-as
+helper for the other side, and if you are waiting on another character, check `world.py get <their-id>` and the
+square every 2 minutes and post asking for it. Then mark it blocked and say in its notes exactly what you tried and
+what was missing. A scenario you could have run is not blocked.
+A scenario stopped by a bug that is already filed (the "Already filed" list, Run context) is `fail`, not
+`blocked`: run it as far as the product lets you, record `fail`, and name the issue in its notes ("#50 refund
+approval fails"). Do not report that bug again.
 
 ## Rules
 - Source code is read-only, to name causes. Never modify, commit or push any repository.
@@ -90,7 +102,9 @@ could have run is not blocked.
 - Reproduce a bug twice before you report it. Read logs once at the end of a flow; never leave a log stream running.
 - Name the cause only when you opened the file and line yourself; otherwise leave mechanism empty.
 
-## Output: write `$OUT/report.json`, updating it after every scenario
+## Output: write `$OUT/report.json` after EVERY scenario
+Write it after each scenario, not at the end of the day: a session can stop early, and a scenario that is not in
+the report counts as never run (one run lost 121 scenarios this way).
 ```json
 {
   "character": "$LANE", "name": "$NAME", "day": $ROUND,

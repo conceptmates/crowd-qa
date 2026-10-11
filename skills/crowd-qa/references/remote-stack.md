@@ -40,3 +40,26 @@ whole backend; this one keeps only the orchestration, the testers and any device
 - Docker stays off here. `context.md` tells testers how to read codes and logs over `ssh stack-host`.
 - `net-stall.sh` freezes the tunnel's ssh for a weak-signal character (`STACK_MODE=remote`).
 - `preflight.sh` checks the tunnel ports and the remote shell, then runs the stack check through the tunnel.
+
+## Browsers on the stack host (BROWSER_SLOTS)
+When this machine is short on memory, run the web characters' browsers on the stack host too:
+`BROWSER_SLOTS="remote:1 remote:2 remote:3 remote:4 remote:5"`. Each web character takes a slot for its day:
+`scripts/remote-chrome.sh` (installed on `REMOTE_HOST` by `preflight.sh`, at `REMOTE_CHROME`) starts a headless
+Chromium with its own profile and CDP on port `REMOTE_CDP_BASE + N`; `scripts/remote-browser.sh` forwards that port
+here, waits until it answers, and the tester's agent-browser talks to it through `AGENT_BROWSER_CDP`.
+`AGENT_BROWSER_EXECUTABLE_PATH` points at `scripts/no-local-browser.sh`, so a browser launch on this machine fails
+loudly instead of quietly testing the wrong browser (`agent-browser connect` started an idle local Chrome per
+session, 39-66 of them in one run).
+- **Size.** One slot per web character that runs at once, plus **one spare** for `extra-browser.sh` (a tester who
+  needs a second user signed in). Without the spare that tester waits for another character's day to end.
+- **Gates.** `REMOTE_MIN_FREE_MB` and `REMOTE_MAX_LOAD_PER_CORE` hold new browsers while the stack host is short
+  (empty = no gate). `BROWSER_SLOTS` is re-read on every try: shrink it and the pool stops granting until enough
+  holders finish; nothing restarts.
+- **Ports.** A slot whose CDP port already listens here (another crowd run, a fix agent) is skipped, and
+  `remote-browser.sh` refuses it.
+- **Card field** `- **Browser timezone**: <IANA zone | date-differs>` sets TZ for that character's Chromium;
+  `date-differs` picks a zone whose date differs from UTC right now, for day-boundary bugs.
+- **Files.** That browser sees only the stack host's files. Put upload files in `REMOTE_UPLOADS/assets/` there and
+  list them in context.md. Its downloads stay there too: give testers a helper that fetches the same document
+  through the API (`templates/pdf.example.py`).
+- `capacity.log` shows `BROWSER`, `WAIT browser` and `SKIP` lines; `browser-pool.sh <run> list` shows the holders.

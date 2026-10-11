@@ -6,6 +6,7 @@
 #   state-saver.sh  state/ on disk every 5 minutes, so any new session can resume the run
 #   square-view.py  the live square page (square/index.html)
 #   tunnel.sh       remote mode only
+#   quota-guard.sh  when CODEX_ACCOUNTS or CLAUDE_ACCOUNTS is set (account rotation through caam)
 #   DEV_CMD         when set and APP_URL does not answer
 RUN="$1"
 . "$RUN/config.env"
@@ -28,6 +29,8 @@ start state-saver "state-saver.sh $RUN" bash "$RUN/scripts/state-saver.sh" "$RUN
 start square-page "square-view.py $RUN" python3 "$RUN/scripts/square-view.py" "$RUN" --watch
 if [ -n "${HEALTH_CHECKS:-}" ]; then start api-watch "api-watch.sh $RUN" bash "$RUN/scripts/api-watch.sh" "$RUN"
 else echo "api-watch: off (set HEALTH_CHECKS in config.env)"; fi
+if [ -n "${CODEX_ACCOUNTS:-}${CLAUDE_ACCOUNTS:-}" ]; then start quota-guard "quota-guard.sh $RUN" bash "$RUN/scripts/quota-guard.sh" "$RUN"
+else echo "quota-guard: off (no CODEX_ACCOUNTS / CLAUDE_ACCOUNTS)"; fi
 [ "${STACK_MODE:-local}" = remote ] && start tunnel "tunnel.sh $RUN" bash "$RUN/scripts/tunnel.sh" "$RUN"
 
 if [ -n "${DEV_CMD:-}" ] && [ -n "${APP_URL:-}" ]; then

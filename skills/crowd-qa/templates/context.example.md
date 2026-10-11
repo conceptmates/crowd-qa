@@ -28,8 +28,21 @@ config, never restart a service. Use the product, record what happened, with evi
   What the business sent back: `<OUTBOX_CMD>`.
 
 ### Time
+- The product's time zone: <Asia/Kolkata>. Every date and time in scenarios and seeded data is in this zone.
 - A simulated day is a few hours. Scheduled jobs: <how to fire them, or "ask on the square">.
 - <Anything that cannot be simulated on this stack, so nobody reports it.>
+
+### The other side of a scenario
+- When a step needs someone else (an admin approves, staff scan a ticket, a seller replies), run
+  `python3 <run>/stack/act-as.py <command>` (from `templates/act-as.example.py`) and quote its answer as evidence.
+
+### Your own test data
+- Seeded per character, listed on each card under "Your own test data". Use only yours.
+
+### Browsers on the test machine (BROWSER_SLOTS remote:N)
+- Your browser runs on <REMOTE_HOST>. Upload files are there already: `<REMOTE_UPLOADS>/assets/` (<list them>).
+- Downloads stay on that machine. Look inside a document with
+  `python3 <run>/stack/pdf.py <email> <password> <document id> $OUT/evidence` (from `templates/pdf.example.py`).
 
 ### Intended behaviour (never a finding)
 - <Upgrade prompts, disabled buttons that are disabled on purpose, labels on unfinished features, redirects.>

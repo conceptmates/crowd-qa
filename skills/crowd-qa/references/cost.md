@@ -14,6 +14,25 @@ week of Codex quota.
 | Agents that only waited on testers | $106 | an agent per character-day, polling |
 | Bought nothing | $156 | redone days, agents re-started on resume, agents killed before they returned |
 
+## Measured: a 20-character run and its follow-ups (2026-10)
+
+A booking product, web only, 20 characters over 2 days, Codex (max effort) and Sonnet (medium) testers, Opus
+model steps, browsers on the stack host.
+
+| Run | Claude spend | What it bought |
+|---|---|---|
+| Main run | $162.56 | 40 character-days, 717 planned scenarios, 77% ran, 144 verified bugs |
+| Make-up round (`makeup.py`: only blocked, not-run and never-reported scenarios) | $35.26 | 19 characters, 1 day |
+| Round 2 | $83.66 | 16 new characters, planned for $13.77 on a reused product map |
+
+What cost most and what changed since:
+- The product map on high effort: $40.85 of $62 of planning in the main run. `MAP_EFFORT` is medium now, and
+  `PRODUCT_MAP_FROM` reuses a saved map when its source commits match.
+- 23% of planned scenarios did not run. Days of up to 31 scenarios ended early (121 never reported), and one Codex
+  account refused the model for 12 character-days. `SCEN_MAX` is 12 and longer days are split; preflight tests the
+  model on every Codex account.
+- A hand switch of Claude accounts failed 29 model calls and forced 6 replans. Only `quota-guard.sh` switches.
+
 ## The same run with this version (estimate)
 
 Scaled from a measured 3-character dry run ($3.16 of model steps and $1.72 of Sonnet testers for three
@@ -60,4 +79,6 @@ Every model step's cost lands in `state/costs.jsonl`; `crowd.py <run> status` ad
 - Run `crowd.py` detached and check on it with `crowd.py <run> status` from a short session, not a long chat
   that re-reads its whole history on every turn.
 - Change capacity in `config.env`; runners read it at every start. Nothing needs a restart.
-- Keep plans to `SCEN_MAX` (default 20) scenarios per character per day.
+- Keep plans to `SCEN_MAX` (default 12) scenarios per character-day; crowd.py splits longer days.
+- Reuse a saved product map (`PRODUCT_MAP_FROM`) for later runs on the same commits.
+- Finish a run's gaps with a make-up run (`crowd.py <run> makeup <new-run>`) instead of running every day again.
