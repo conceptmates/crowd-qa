@@ -30,7 +30,9 @@ per call, recommended option first. Ask only what earlier answers have settled.
    on whom. Language for cards and the square (`SQUARE_LANG`).
 3. **Engines.** Ask the question in `references/engines.md`: the main tester (Sonnet medium is recommended),
    which characters run on Codex (3-5 picked up front), and what happens at a usage limit. Preflight fails until
-   `ENGINE_CONFIRMED=yes`, so this cannot be skipped by accident.
+   `ENGINE_CONFIRMED=yes`, so this cannot be skipped by accident. With several subscription accounts, list their
+   caam profiles in `CODEX_ACCOUNTS` / `CLAUDE_ACCOUNTS`; `quota-guard.sh` rotates them. From launch on, only the
+   guard switches accounts: a switch by hand fails the Opus steps that are running.
 4. **Access and safety.** Test accounts, how verification codes and emails are read, payment test keys, what
    testers may create or delete, data they must never touch. A missing credential becomes a blocked scenario.
 5. **Output.** Trackers per bug kind (`TRACKERS="app=owner/app backend=owner/api"`, or a `FILE_CMD` hook for
@@ -61,6 +63,14 @@ The stack:
 - Hooks for what a real user gets from outside the product: `CONNECT_CMD` (connect a fake third-party account),
   `CUSTOMERS_CONFIG` with `scripts/customer.py` (inbound messages from simulated customers), `OUTBOX_CMD`,
   `MAIL_CMD`.
+- Browsers on the stack host when this machine is short: `BROWSER_SLOTS="remote:1 ... remote:N"`, one slot per web
+  character at once **plus one spare** for second-user browsers (`references/remote-stack.md`).
+- Fixtures: seed what a scenario uses up (a ticket to scan, a single-use code, a booking to cancel) per character
+  and list it on the card; seed dates in the product's time zone; seed states with side effects through the
+  product's own calls; give characters who sign up no account. Write an act-as helper
+  (`templates/act-as.example.py`) for the other side of a scenario, so nobody waits on the square, and, with
+  remote browsers, a download helper (`templates/pdf.example.py`). Name both in context.md.
+- A product map saved from an earlier run on the same commits: `PRODUCT_MAP_FROM=<path>`.
 
 ## Step 3: Write the crowd
 Every crowd has three core characters, then people from the product's own user base:
@@ -76,7 +86,7 @@ or a screen reader, someone on a slow network (faked in their own browser with `
 whoever depends on someone else's work.
 
 Write `lanes/<id>/card.md` from `templates/character-card.md` (add `- **Engine**: codex` for characters on
-Codex) and `$RUN/lanes.json`: `[{"id", "role", "surface", "depends_on": [...]}]`. Show the user all cards (one
+Codex, `- **Your own test data**:` for what was seeded for them, optionally `- **Browser timezone**:`) and `$RUN/lanes.json`: `[{"id", "role", "surface", "depends_on": [...]}]`. Show the user all cards (one
 table and the stories) and get approval. Plans are written later by `crowd.py`, one per character, from a
 product map it writes once.
 
@@ -86,7 +96,8 @@ bash "$RUN/scripts/restart-watchers.sh" "$RUN"    # api-watch, state saver, squa
 bash "$RUN/scripts/preflight.sh" "$RUN"
 ```
 Every line must PASS: disk, the stack check, every health check right now, the engines chosen and their CLIs
-answering, watchers running, `lanes.json` present. Fix failures before launch; thirty characters failing the
+answering, every Codex account accepting the tester model, remote browsers installable, watchers (and the quota
+guard) running, `lanes.json` present. Fix failures before launch; thirty characters failing the
 same way costs thirty times as much.
 
 ## Step 5: Launch and watch
@@ -95,8 +106,9 @@ nohup python3 "$RUN/scripts/crowd.py" "$RUN" all >> "$RUN/logs/crowd.out" 2>&1 <
 python3 "$RUN/scripts/crowd.py" "$RUN" status        # whenever you or the user want to know
 ```
 `all` runs these steps, and each one skips work already on disk:
-1. **plan**: the product map, then each character's plan (`## Day N`, at most `SCEN_MAX` scenarios a day).
-   A character with no usable plan after two attempts is skipped and logged.
+1. **plan**: the product map (or a copy from `PRODUCT_MAP_FROM`), then each character's plan (`## Day N`, at
+   most `SCEN_MAX`, default 12, scenarios a day; a longer day is split into more sessions). A character with no
+   usable plan after two attempts is skipped and logged.
 2. **run**: every character-day in dependency order. A dependent starts when its provider's run that day has
    finished, not when it has been judged, and days do not wait for each other. Each day is judged as soon as
    it ends: coverage, missing evidence and duplicates are checked in code, then a judge looks at what is left.
@@ -119,11 +131,15 @@ so nothing needs a restart.
 - **The stack goes down.** `api-watch.sh` writes `STACK_DOWN` after two failed checks; no character starts,
   testers hold and record nothing, and the window is written to `stack-faults.md`. Fix the stack; the crowd
   continues by itself.
-- **A usage limit.** With a fallback set, only the engine that ran out hands over. Without one,
-  `QUOTA_PAUSE.<engine>` holds that engine's characters and `crowd.py` lifts it after `RETRY_PRIMARY_MIN`.
+- **A usage limit.** With accounts listed, the guard switches first and testers resume their session
+  (`quota.log`). With a fallback set, only the engine that ran out hands over. Without one,
+  `QUOTA_PAUSE.<engine>` holds that engine's characters until the guard or `RETRY_PRIMARY_MIN` lifts it.
 - **The session, the machine or the stack host restarts.** Run `bash "$RUN/scripts/resume.sh" "$RUN"`. It
   restarts the watchers, runs the watchdog and the stack check, and starts `crowd.py` again unless it is still
   running. Live testers are waited for, never started twice. `references/resume.md` lists every state file.
+- **Scenarios left blocked or unreported** once the run is over: seed what they lacked, then
+  `python3 "$RUN/scripts/crowd.py" "$RUN" makeup "$NEW"` builds a run of only those (blocked by a filed bug are left
+  out), with the cards, diaries and filed list carried over. Preflight and launch it like any run.
 - **A day must run again** (its data was lost): move that `lanes/<id>/round<N>/` into `archive/<reason>/` and
   resume. Verified findings from archived days can go in `archive/<reason>/prior_findings.json`.
 
@@ -145,13 +161,17 @@ the spend from `crowd.py status`. Quote only URLs the tracker returned.
 ## Files
 - `scripts/crowd.py`: the run loop (plan, run, judge, dedupe, file, report, status)
 - `scripts/run-tester.sh`: one character-day on any surface; per-character engine, lean Claude sessions in
-  budget chunks, stack probe before start, per-engine quota pauses
+  budget chunks, stack probe before start, per-engine quota pauses, browser slots
+- `scripts/quota-guard.sh`: account rotation through caam; `scripts/makeup.py`: a run of what was left
+- `scripts/browser-pool.sh`, `scripts/remote-browser.sh`, `scripts/remote-chrome.sh` (runs on the stack host),
+  `scripts/extra-browser.sh`, `scripts/no-local-browser.sh`
 - `scripts/preflight.sh`, `scripts/init-crowd.sh`, `scripts/resume.sh`, `scripts/restart-watchers.sh`
 - `scripts/api-watch.sh`, `scripts/watchdog.sh`, `scripts/capacity.sh`, `scripts/device-pool.sh`,
   `scripts/tunnel.sh`, `scripts/net-stall.sh`, `scripts/memlog.sh`, `scripts/state-saver.sh`, `scripts/save-state.py`
 - `scripts/square.py`, `scripts/square-view.py`, `scripts/world.py`, `scripts/customer.py`, `scripts/act.py`,
   `scripts/judge-pack.py`, `scripts/status.py`
-- `templates/`: character card, tester brief, scenario format, issue templates, context and stack-check examples
+- `templates/`: character card, tester brief, scenario format, issue templates, context, stack-check, act-as and
+  download-helper examples
 - `references/`: `engines.md` (the engine question), `cost.md`, `lessons.md`, `resume.md`, `hooks.md`,
   `remote-stack.md`, `mirofish-mapping.md`
 - `tests/test_crowd.py` in the repo: the scripts end to end with fake engines, offline
