@@ -21,6 +21,10 @@
 # engine that ran out) and that engine's characters continue on the fallback, from report.json. Without a
 # fallback, or when the fallback runs out too, it writes QUOTA_PAUSE.<engine> and stops the day: only characters
 # on that engine wait; crowd.py lifts the pause after RETRY_PRIMARY_MIN minutes and starts the day again.
+# quota-guard.sh may switch an engine's account mid-day and stop its testers (.engine-switched): the loop resumes
+# the same session on the new account. BROWSER_SLOTS caps web browsers (browser-pool.sh); a remote slot runs the
+# character's Chromium on REMOTE_HOST and the tester reaches it through AGENT_BROWSER_CDP, with any local browser
+# launch refused (no-local-browser.sh). A browser that never comes up ends the day as exit=retry, queued again.
 set -u
 if [ -z "${RUNNER_FROZEN:-}" ]; then
   # freeze a copy per character-day so editing the script mid-run never changes a running day
@@ -54,6 +58,20 @@ cleanup() {
   case "$SURFACE" in ios|android) bash "$RUN/scripts/device-pool.sh" "$RUN" release "$LANE" ;; esac
   [ "${EXCL_OWNER:-}" = 1 ] && rm -f "$RUN/.exclusive"
   rm -f "$RUN/.active/$LANE"
+  # browser slots (BROWSER_SLOTS): stop the remote Chromium, its CDP forward and any extra browsers, give the slots back
+  if [ -n "${BROWSER_SLOTS:-}" ] && [ "$SURFACE" = web ]; then
+    case "${BROWSER_SLOT:-}" in remote:*) bash "$RUN/scripts/remote-browser.sh" "$RUN" stop "$LANE" ;; esac
+    for f in "$RUN"/.browsers/extra-"$LANE"-[0-9]*; do
+      [ -f "$f" ] || continue; X=${f##*/extra-}
+      case "$(cat "$f")" in
+        remote:*) bash "$RUN/scripts/remote-browser.sh" "$RUN" stop "$X" ;;
+        *) env -u AGENT_BROWSER_CDP -u AGENT_BROWSER_EXECUTABLE_PATH AGENT_BROWSER_SESSION="crowd-$X" agent-browser close >/dev/null 2>&1 ;;
+      esac
+      rm -f "$f"
+    done
+    bash "$RUN/scripts/browser-pool.sh" "$RUN" release "$LANE"
+    BROWSER_SLOT=""
+  fi
 }
 done_with() {
   echo "$1" > "$OUT/DONE"; state "done" "{\"done\": \"$1\"}"
@@ -97,8 +115,37 @@ done
 mkdir -p "$RUN/.active"; touch "$RUN/.active/$LANE"
 state "running" "{\"device\": \"$DEVICE\", \"surface\": \"$SURFACE\"}"
 
+# BROWSER_SLOTS caps how many browsers run at once and where (references/remote-stack.md). A remote slot is a
+# headless Chromium on REMOTE_HOST, its CDP port forwarded here; this machine then runs no browser at all.
+BROWSER_SLOT=""
+if [ "$SURFACE" = web ] && [ -n "${BROWSER_SLOTS:-}" ]; then
+  state "waiting-browser"
+  BROWSER_SLOT=$(bash "$RUN/scripts/browser-pool.sh" "$RUN" acquire "$LANE" $$ | tail -1)
+  case "$BROWSER_SLOT" in remote:*)
+    # card field "Browser timezone": an IANA zone, or "date-differs" = a zone whose local date is not the UTC date
+    # right now (ahead of UTC if possible), for bugs that only show when the browser's day and the server's differ
+    BTZ=$(card_field "Browser timezone" | awk '{print $1}')
+    if [ "$BTZ" = date-differs ]; then
+      BTZ=$(python3 -c "
+import datetime as d
+u=d.datetime.now(d.timezone.utc)
+for o in list(range(14,0,-1))+list(range(-1,-13,-1)):
+    if (u+d.timedelta(hours=o)).date()!=u.date(): print('Etc/GMT'+('-' if o>0 else '+')+str(abs(o))); break")
+    fi
+    [ -n "$BTZ" ] && echo "browser timezone $BTZ" >> "$OUT/browser.log"
+    # a browser that never came up is not a tested day: crowd.py queues it again (exit=retry)
+    CDP=$(bash "$RUN/scripts/remote-browser.sh" "$RUN" start "$LANE" "$BROWSER_SLOT" $BTZ 2>>"$OUT/browser.log") \
+      || done_with "exit=retry rc=remote-browser-failed"
+    # every agent-browser call goes straight to the remote Chromium; a browser launch on this machine is refused
+    export AGENT_BROWSER_CDP="$CDP" AGENT_BROWSER_EXECUTABLE_PATH="$RUN/scripts/no-local-browser.sh" ;;
+  esac
+fi
+
 case "$SURFACE" in
-  web) TOOL_NOTE="Your browser is the agent-browser session $SESSION (headless). Never run agent-browser close --all, never start another session for yourself. Need a second user signed in at the same time? Use the session $SESSION-2." ;;
+  web) case "$BROWSER_SLOT" in
+         remote:*) TOOL_NOTE="Your browser is a headless Chromium on the test machine $REMOTE_HOST (slot $BROWSER_SLOT), already open in your agent-browser session $SESSION (AGENT_BROWSER_CDP is set in your shell). Use agent-browser as usual (open, snapshot, click, fill, screenshot to paths under \$OUT/shots). Never run agent-browser close, connect, or --all, and never unset AGENT_BROWSER_CDP. That browser sees only files on its own machine: for uploads use the files Run context lists under ${REMOTE_UPLOADS:-/tmp/crowd-uploads}/assets/, or scp your own to $REMOTE_HOST:${REMOTE_UPLOADS:-/tmp/crowd-uploads}/$LANE/ and give agent-browser that path. Its downloads stay there too: read a downloaded document the way Run context says (a helper that fetches it through the product's API), not from a local Downloads folder. Need a second user signed in at the same time? Run  bash \$RUN/scripts/extra-browser.sh \$RUN \$LANE 2  and use the session and AGENT_BROWSER_CDP value it prints. Never start any other browser." ;;
+         *) TOOL_NOTE="Your browser is the agent-browser session $SESSION (headless). Never run agent-browser close --all, never start another session for yourself. Need a second user signed in at the same time? Run  bash \$RUN/scripts/extra-browser.sh \$RUN \$LANE 2  and use the session it prints." ;;
+       esac ;;
   ios|android) TOOL_NOTE="Your device is $DEVICE: pass --udid $DEVICE (or --serial) to agent-device. Prefer scripts/act.py for taps and fills." ;;
   cli) mkdir -p "$OUT/work"; TOOL_NOTE="You use the product's command-line tool (see Run context for how to run it). Work in $OUT/work. Save each flow's terminal output to $OUT/evidence/<scenario-id>.txt (command, output, exit code); those files are your screenshots." ;;
   api) TOOL_NOTE="You use the product's HTTP API (see Run context for the base URL and how to authenticate). Use curl -sS -i and save every request and response pair to $OUT/evidence/<scenario-id>-<step>.http; those files are your screenshots." ;;
@@ -107,7 +154,7 @@ esac
 
 # The values testers use in commands are exported, so the brief stays identical for every character and the
 # shared part of the prompt (brief, then context) is a real cache prefix across the crowd.
-export RUN LANE ROUND OUT NAME SURFACE SESSION DEVICE APP_URL="${APP_URL:-}" APP_ID="${APP_ID:-}"
+export RUNNER_PID=$$ RUN LANE ROUND OUT NAME SURFACE SESSION DEVICE APP_URL="${APP_URL:-}" APP_ID="${APP_ID:-}"
 PREV=$((ROUND-1))
 day_section() {  # only today's scenarios plus the sweep; the other days' plans are dead weight in the prompt
   awk -v d="$ROUND" '
@@ -221,7 +268,8 @@ TRIES=0; CHUNKS=0; FRESH=""
 while :; do
   TRIES=$((TRIES+1)); [ "$TRIES" -gt 30 ] && done_with "exit=1 rc=too-many-switches"
   . "$RUN/config.env"   # re-read each attempt, so model and effort changes apply on the next switch
-  expire_marker "$RUN/TESTER_FALLBACK"
+  # a fallback quota-guard wrote stays until the guard removes it (when Codex has room again)
+  grep -q "by=guard" "$RUN/TESTER_FALLBACK" 2>/dev/null || expire_marker "$RUN/TESTER_FALLBACK"
   ENGINE="${CARD_ENGINE:-${TESTER:-codex}}"
   # the fallback only replaces an engine that ran out (the marker names it), not every character's engine
   if [ -f "$RUN/TESTER_FALLBACK" ] && [ -n "${FALLBACK_TESTER:-}" ] && grep -q "from=$ENGINE " "$RUN/TESTER_FALLBACK"; then
@@ -232,6 +280,8 @@ while :; do
   MODEL="$(engine_model "$ENGINE" | cut -d'|' -f1)"; EFFORT="$(engine_model "$ENGINE" | cut -d'|' -f2)"
   PREV_ENGINE=$(cat "$OUT/engine" 2>/dev/null); echo "$ENGINE" > "$OUT/engine"
   RESUME=""; [ -s "$OUT/report.json" ] && { cp "$OUT/report.json" "$OUT/report.partial.json"; RESUME=1; }
+  # stopped by quota-guard (an account switch) before report.json existed: still resume the same session
+  [ -z "$RESUME" ] && [ "$PREV_ENGINE" = "$ENGINE" ] && has_session "$ENGINE" && RESUME=1
   N=$(ls "$OUT"/tester*.log 2>/dev/null | wc -l | tr -d ' ')
   LOG="$OUT/tester.log"; [ "$N" -gt 0 ] && LOG="$OUT/tester.run$N.log"
   state "running" "{\"engine\": \"$ENGINE\", \"device\": \"$DEVICE\", \"surface\": \"$SURFACE\"}"
@@ -240,7 +290,13 @@ while :; do
   if [ -n "$RESUME" ] && { [ -n "$FRESH" ] || { [ "$PREV_ENGINE" != "$ENGINE" ] && ! has_session "$ENGINE"; }; }; then
     printf '\n## RESUME (%s)\nThis day was started by another tester and interrupted. Partial progress: %s/report.partial.json, evidence in %s/shots/ and %s/evidence/, your memory in memory.md. Copy the partial report to report.json, keep its valid results and evidence, continue with every not_run scenario.\n' "$(date +%H:%M)" "$OUT" "$OUT" "$OUT" >> "$OUT/prompt.md"
   fi
+  T0=$(date +%s)
   run_engine "$ENGINE" "$MODEL" "$EFFORT" "$LOG"; RC=$?; FRESH=""
+  # quota-guard switched this engine's account (or paused it) while the tester ran and stopped it: go round again.
+  # The loop resumes the SAME session on the new account with a two-line message, or ends the day as paused.
+  if [ -f "$RUN/.engine-switched" ] && [ "$(mtime "$RUN/.engine-switched")" -ge "$T0" ] && [ "$RC" -ne 0 ]; then
+    echo "$(date) stopped by quota-guard (rc=$RC): resuming the same session" >> "$OUT/resume.log"; continue
+  fi
   # a spent chunk is not a failure: a fresh session carries on from report.json with a short context
   if [ "$ENGINE" = claude ] && tail -c 2000 "$LOG" | grep -q "Exceeded USD budget"; then
     CHUNKS=$((CHUNKS+1))
@@ -251,9 +307,10 @@ while :; do
     RC=0; break
   fi
   if limit_hit "$LOG"; then
-    if [ ! -f "$RUN/TESTER_FALLBACK" ] && [ -n "${FALLBACK_TESTER:-}" ] && [ "$ENGINE" != "$FALLBACK_TESTER" ]; then
-      # the primary ran out: every character's next attempt uses the fallback (this one right away)
-      echo "since=$(date +%s) from=$ENGINE to=$FALLBACK_TESTER lane=$LANE" > "$RUN/TESTER_FALLBACK"
+    if [ -n "${FALLBACK_TESTER:-}" ] && [ "$ENGINE" != "$FALLBACK_TESTER" ]; then
+      # the primary ran out: every character's next attempt uses the fallback (this one right away, from its
+      # report.json). quota-guard may have written the marker already when the engine came near its limit.
+      [ -f "$RUN/TESTER_FALLBACK" ] || echo "since=$(date +%s) from=$ENGINE to=$FALLBACK_TESTER lane=$LANE" > "$RUN/TESTER_FALLBACK"
       continue
     fi
     # no fallback, or the fallback is out too: this engine pauses; crowd.py starts the day again later
@@ -263,7 +320,8 @@ while :; do
   break
 done
 case "$SURFACE" in
-  web) agent-browser close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$SESSION-2" agent-browser close >/dev/null 2>&1 ;;
+  web) case "$BROWSER_SLOT" in remote:*) ;;   # cleanup stops remote browsers
+         *) agent-browser close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$SESSION-2" agent-browser close >/dev/null 2>&1 ;; esac ;;
   ios|android) agent-device close >/dev/null 2>&1 ;;
 esac
 done_with "exit=$RC engine=$ENGINE"
