@@ -8,6 +8,7 @@ usage:
   crowd.py <run> all        plan, run, dedupe, file, report (each step skips work already on disk)
   crowd.py <run> plan|run|dedupe|file|report
   crowd.py <run> status     one screen: every character-day, model spend so far
+  crowd.py <run> makeup <new-run>   a new run dir with only the scenarios this run never finished (scripts/makeup.py)
 
 Run it detached so it survives the orchestrating session: nohup python3 <run>/scripts/crowd.py <run> all \\
   >> <run>/logs/crowd.out 2>&1 &
@@ -212,11 +213,87 @@ def plan_ok(cid):
     return all(day_scenarios(cid, d) for d in range(1, DAYS + 1))
 
 
+def ndays(cid):
+    """Days this character runs: DAYS, or more when split_days split a long day (lanes/<id>/days holds the count)."""
+    try:
+        return max(DAYS, int(read(os.path.join(lane_dir(cid), "days")).strip()))
+    except ValueError:
+        return DAYS
+
+
+def split_days(cid, cap):
+    """Splits every '## Day N' section with more than cap scenarios into consecutive days of at most cap. Days with
+    31 scenarios ended early and 121 scenarios were never reported, so no session gets more than cap. Only before the
+    character's first day has started; the plan as written is kept in scenarios.unsplit.md."""
+    sp = os.path.join(lane_dir(cid), "scenarios.md")
+    if cap <= 0 or glob.glob(os.path.join(lane_dir(cid), "round*")):
+        return False
+    txt = read(sp)
+    parts = re.split(r"(?m)^(?=## )", txt)
+    head, days, rest = parts[0] if not parts[0].startswith("## ") else "", [], []
+    for part in parts:
+        m = re.match(r"## Day (\d+)\b(.*)", part)
+        if m:
+            blocks = re.split(r"(?m)^(?=### S\d+)", part.split("\n", 1)[1] if "\n" in part else "")
+            pre, scen = (blocks[0], blocks[1:]) if not blocks[0].startswith("### ") else ("", blocks)
+            days.append((int(m.group(1)), m.group(2).rstrip(), pre, scen))
+        elif part.startswith("## "):
+            rest.append(part)
+    if not any(len(sc) > cap for d, _, _, sc in days if d <= DAYS):
+        return False
+    out, n = [head], 0
+    for d, title, pre, scen in sorted(days):
+        if d > DAYS:
+            continue                # a plan's sections beyond DAYS never ran before either
+        chunks = [scen[i:i + cap] for i in range(0, len(scen), cap)] or [[]]
+        for k, ch in enumerate(chunks, 1):
+            n += 1
+            label = title if len(chunks) == 1 else f" (day {d}, part {k} of {len(chunks)})"
+            out.append(f"## Day {n}{label}\n" + (pre if k == 1 else "") + "".join(ch))
+    shutil.copy(sp, os.path.join(lane_dir(cid), "scenarios.unsplit.md"))
+    with open(os.path.join(lane_dir(cid), "days"), "w") as f:
+        f.write(f"{n}\n")
+    with open(sp, "w") as f:
+        f.write("".join(out) + "".join(rest))
+    log(f"plan:{cid}: days longer than SCEN_MAX={cap} split; now {n} days")
+    return True
+
+
+def git_head(path):
+    r = subprocess.run(["git", "-C", path, "rev-parse", "HEAD"], capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def reuse_map(pm):
+    """PRODUCT_MAP_FROM: copy a saved map when it was written from the commits SOURCE_PATHS are at now. The commits
+    come from the map's sidecar (<map>.src, written with every map) or its file name (map-fe-b811b27-be-9cd1c1c.md).
+    A fresh map cost $41 of a $62 planning bill on high effort, so a match is worth checking."""
+    src = cfg("PRODUCT_MAP_FROM")
+    if not src:
+        return False
+    if not os.path.isfile(src):
+        log(f"plan: PRODUCT_MAP_FROM {src} does not exist; writing a fresh map")
+        return False
+    known = " ".join(jload(src + ".src", {}).get("commits", {}).values()) + " " + os.path.basename(src)
+    heads = {p: git_head(p) for p in cfg("SOURCE_PATHS").split()}
+    stale = [f"{p}@{h[:7]}" for p, h in heads.items() if h and h[:7] not in known]
+    if stale:
+        log(f"plan: PRODUCT_MAP_FROM {src} was written from other commits than {', '.join(stale)}; writing a fresh map")
+        return False
+    shutil.copy(src, pm)
+    if os.path.exists(src + ".src"):
+        shutil.copy(src + ".src", pm + ".src")
+    checked = [f"{os.path.basename(p)}@{h[:7]}" for p, h in heads.items() if h]
+    log(f"plan: product map copied from {src} " + (f"(source commits match: {', '.join(checked)})" if checked
+                                                    else "(SOURCE_PATHS are not git checkouts: commits not checked)"))
+    return True
+
+
 def plan():
     os.makedirs(os.path.join(RUN, "state"), exist_ok=True)
     src = cfg("SOURCE_PATHS")
     pm = os.path.join(RUN, "product-map.md")
-    if not (os.path.exists(pm) and os.path.getsize(pm) > 500):
+    if not (os.path.exists(pm) and os.path.getsize(pm) > 500) and not reuse_map(pm):
         log("plan: writing the product map")
         llm("product-map", f"""Write the product map every scenario planner of this crowd QA run reads instead of the
 source. Source: {src}. Run dir: {RUN} (context.md says what the product is and which surfaces the crowd uses).
@@ -224,10 +301,12 @@ For each surface in use (web screens, mobile screens, CLI commands, API endpoint
 visible labels of buttons, fields and tabs, what each role may do, plan or feature gates, limits and validation
 rules, the server-side refusals a user can hit and their wording, and anything scheduled or asynchronous. Cite
 file:line for rules. Group by area. Tables and lists, completeness over prose.""",
-            cfg("PLANNER_MODEL", "opus"), cfg("MAP_EFFORT", "high"), pm, text=True)
+            cfg("PLANNER_MODEL", "opus"), cfg("MAP_EFFORT", "medium"), pm, text=True)
+        if os.path.exists(pm):
+            jsave(pm + ".src", {"commits": {p: git_head(p) for p in src.split() if git_head(p)}})
     todo = [c for c in characters() if not plan_ok(c["id"])]
     skipped = set(jload(os.path.join(RUN, "state", "skipped.json"), []))
-    cap = cfg_int("SCEN_MAX", 20)
+    cap = cfg_int("SCEN_MAX", 12)
 
     def one(c):
         cid = c["id"]
@@ -240,16 +319,19 @@ at most 3 targeted lookups (rg -n -m5, or sed -n on 40 lines or less) for a labe
 behaviour is not a bug: never design a scenario that expects it to be different. {note}
 Write {sp} following {RUN}/templates/scenario-format.md, with one "## Day N" section per day (1..{DAYS}), each
 scenario headed "### S<n> — <title>  [happy|failure|edge]", at most {cap} scenarios per day, then one
-"## Exhaustive sweep" section. Day 1 is their first contact with the product; later days come back to what they
-made and to what other characters did to them. At least 60% failure and edge paths, in this person's habits.
-For a boundary tester, stay inside the product's own screens, commands and endpoints and describe each check
-plainly. Do not open the product."""
+"## Exhaustive sweep" section. If a day truly needs more than {cap}, write them all: code splits that day into
+sessions of {cap}, since longer sessions ended early and left scenarios unreported. Day 1 is their first contact with the product; later days come
+back to what they made and to what other characters did to them. At least 60% failure and edge paths, in this
+person's habits. For a boundary tester, stay inside the product's own screens, commands and endpoints and describe
+each check plainly.
+Test data: a scenario that consumes something (a ticket to scan, a single-use code, a booking to cancel, a pending
+item to approve) uses data seeded for this character alone; name it under Test data as "own: <what>" so it can be
+seeded, and never use something another character's scenarios will consume or change. Dates and times are in the
+product's time zone (context.md), not UTC. When a step needs another person to act (an admin approves, staff scan),
+use the act-as helper context.md names instead of waiting for a character. Do not open the product."""
         for attempt in (1, 2):
             llm(f"plan:{cid}", prompt, cfg("PLANNER_MODEL", "opus"), cfg("PLANNER_EFFORT", "medium"), sp, text=True)
             if plan_ok(cid):
-                big = [d for d in range(1, DAYS + 1) if len(day_scenarios(cid, d)) > cap]
-                if big:
-                    log(f"plan:{cid}: days {big} have more than {cap} scenarios")
                 return cid, True
             prompt += f"\n\nThe file is missing a '## Day N' section with '### S<n>' scenarios for some day. Rewrite {sp} complete."
         return cid, False
@@ -258,10 +340,13 @@ plainly. Do not open the product."""
         for cid, ok in ex.map(one, todo):
             if ok:
                 skipped.discard(cid)
-                log(f"plan:{cid}: {sum(len(day_scenarios(cid, d)) for d in range(1, DAYS + 1))} scenarios")
+                log(f"plan:{cid}: {sum(len(day_scenarios(cid, d)) for d in range(1, ndays(cid) + 1))} scenarios")
             else:
                 skipped.add(cid)
                 log(f"plan:{cid}: no usable plan after two attempts; character skipped (see logs/crowd.log)")
+    for c in characters():          # plans written by hand or by an earlier version are held to SCEN_MAX too
+        if plan_ok(c["id"]):
+            split_days(c["id"], cap)
     jsave(os.path.join(RUN, "state", "skipped.json"), sorted(skipped))
 
 
@@ -419,22 +504,31 @@ def paused(engine):
     return False
 
 
+def requeue(dl):
+    """A day that stopped at a usage limit, or whose browser never came up (exit=retry), runs again later."""
+    return "quota" in dl or dl.startswith("exit=retry")
+
+
 def run():
     os.makedirs(os.path.join(RUN, "state"), exist_ok=True)
     chars = characters()
+    for c in chars:
+        if plan_ok(c["id"]):
+            split_days(c["id"], cfg_int("SCEN_MAX", 12))
+    nd = {c["id"]: ndays(c["id"]) for c in chars}
     ids = {c["id"] for c in chars}
     skipped = set(jload(os.path.join(RUN, "state", "skipped.json"), []))
     skipped |= {c["id"] for c in chars if not plan_ok(c["id"])}
     st, procs, waits = {}, {}, {}
     for c in chars:
-        for d in range(1, DAYS + 1):
+        for d in range(1, nd[c["id"]] + 1):
             k = (c["id"], d)
             dl = done_line(*k)
             if c["id"] in skipped:
                 st[k] = "skipped"
             elif os.path.exists(os.path.join(round_dir(*k), "verdict.json")):
                 st[k] = "judged"
-            elif dl and "quota" not in dl:
+            elif dl and not requeue(dl):
                 st[k] = "ran"
             elif runner_alive(*k):
                 st[k] = "running"          # a runner from before a restart: wait for it, never start a second
@@ -446,7 +540,7 @@ def run():
     cap = cfg_int("HARD_CAP", 4)
     judges = cf.ThreadPoolExecutor(cfg_int("JUDGE_PARALLEL", 4))
     futs = {}
-    log(f"run: {len(chars)} characters x {DAYS} days, {sum(v == 'pending' for v in st.values())} character-days to run")
+    log(f"run: {len(chars)} characters, {sum(nd.values())} character-days, {sum(v == 'pending' for v in st.values())} character-days to run")
     finished = ("judged", "skipped", "failed")
     last_down_note = 0
     while not all(v in finished for v in st.values()):
@@ -463,11 +557,12 @@ def run():
                         f.write(dl + "\n")
             if not dl:
                 continue
-            if "quota" in dl:
+            if requeue(dl):
                 waits[k] = waits.get(k, 0) + 1
                 os.replace(os.path.join(round_dir(*k), "DONE"), os.path.join(round_dir(*k), "DONE.stale-quota"))
                 st[k] = "pending" if waits[k] <= cfg_int("MAX_QUOTA_WAITS", 8) else "failed"
-                log(f"{k[0]} d{k[1]}: stopped at a usage limit (wait {waits[k]})")
+                why = "at a usage limit" if "quota" in dl else f"before testing ({dl})"
+                log(f"{k[0]} d{k[1]}: stopped {why} (wait {waits[k]})")
             else:
                 st[k] = "ran"
                 log(f"{k[0]} d{k[1]}: tester finished: {dl}")
@@ -490,15 +585,15 @@ def run():
             last_down_note = 0
         running = sum(v == "running" for v in st.values())
         for c in chars:
-            for d in range(1, DAYS + 1):
+            for d in range(1, nd[c["id"]] + 1):
                 k = (c["id"], d)
                 if st[k] != "pending" or running >= cap or paused(engine_of(c["id"])):
                     continue
                 if d > 1 and st[(c["id"], d - 1)] not in finished:
                     continue        # tomorrow starts once yesterday is judged: its prompt carries the verdict
-                if any(st[(p, d)] not in ("ran", "judging") + finished for p in deps[c["id"]]):
+                if any(st.get((p, d), "judged") not in ("ran", "judging") + finished for p in deps[c["id"]]):
                     continue        # a dependent waits for its provider's run that day, not for its judge
-                gone = [p for p in deps[c["id"]] if st[(p, d)] in ("skipped", "failed")]
+                gone = [p for p in deps[c["id"]] if st.get((p, d)) in ("skipped", "failed")]
                 if gone:
                     log(f"{c['id']} d{d}: starts although {', '.join(gone)} did not run that day; expect blocked scenarios")
                 rd = round_dir(*k)
@@ -523,7 +618,7 @@ def dedupe():
     for f in glob.glob(os.path.join(RUN, "archive", "*", "prior_findings.json")):
         found += jload(f, [])
     for c in characters():
-        for d in range(1, DAYS + 1):
+        for d in range(1, ndays(c["id"]) + 1):
             found += jload(os.path.join(round_dir(c["id"], d), "verdict.json"), {}).get("verified_findings", [])
     roles = {c["id"]: c.get("role", "") for c in characters()}
     n = len(found)
@@ -797,7 +892,7 @@ def report():
     never = []
     for c in characters():
         any_day = False
-        for d in range(1, DAYS + 1):
+        for d in range(1, ndays(c["id"]) + 1):
             v = jload(os.path.join(round_dir(c["id"], d), "verdict.json"))
             if not v:
                 continue
@@ -879,6 +974,10 @@ def main():
     os.makedirs(os.path.join(RUN, "state"), exist_ok=True)
     if CMD == "status":
         return status()
+    if CMD == "makeup":
+        if len(sys.argv) < 4:
+            sys.exit("usage: crowd.py <run> makeup <new-run> [--scen-max N]")
+        sys.exit(subprocess.run(["python3", os.path.join(SCRIPTS, "makeup.py"), RUN, *sys.argv[3:]]).returncode)
     pid_f = os.path.join(RUN, "logs", "crowd.pid")
     old = read(pid_f).strip()
     if old and old != str(os.getpid()) and subprocess.run(["kill", "-0", old], capture_output=True).returncode == 0:

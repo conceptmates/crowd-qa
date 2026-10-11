@@ -26,6 +26,9 @@ when something goes wrong.
 - **Wants on day 2**: see what her stylists replied to clients and move a booking
 - **Relationships**: employs ama and kofi (agents); depends_on: none
 - **Email**: grace@crowd.test, password CrowdQA!2026
+- **Browser timezone**: Asia/Kolkata   # optional, remote browsers: an IANA zone, or date-differs (a zone whose
+                                #   date differs from UTC right now, for day-boundary bugs)
+- **Your own test data**: ticket BK-1042 (paid, never scanned), coupon GRACE15 (one use)   # seeded for her alone
 
 ## Story
 Two paragraphs in plain prose: how she got here, what she fears (looking foolish in front of a client, losing
@@ -50,4 +53,9 @@ How she writes a complaint, with two example lines.
 - Exclusive characters stop everyone else while they run. Fake a weak network inside the character's own
   browser instead (`agent-browser offline on/off`).
 - No two characters own the same core scenario; overlap only where a me-too is expected.
+- Anything a scenario uses up or changes (a ticket to scan, a single-use code, a booking to cancel, an item waiting
+  for approval) is seeded per character and listed under "Your own test data". In one run a scanner's ticket was
+  cancelled by the customer character first, and the scan scenario failed for a reason that was not a bug.
+- A character whose day starts with sign-up or email verification gets no seeded account: a pre-made, pre-verified
+  account made those scenarios impossible in one run.
 - Names are people, not jobs. Never "User 3".
