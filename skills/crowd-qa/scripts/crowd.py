@@ -130,7 +130,7 @@ def filed_titles():
 
 
 # ------------------------------------------------------------------------------------------------- the model
-LIMIT_RE = re.compile(r"usage limit|rate.?limit|overloaded|\b429\b|\b529\b|hit your limit|quota exceeded|out of extra usage", re.I)
+LIMIT_RE = re.compile(r"usage limit|rate.?limit|overloaded|\b429\b|\b529\b|hit your limit|hit your session limit|session limit|quota exceeded|out of extra usage", re.I)
 
 
 def llm(step, prompt, model, effort, out_path, required=(), text=False, timeout=5400):
@@ -544,6 +544,7 @@ def run():
     finished = ("judged", "skipped", "failed")
     last_down_note = 0
     while not all(v in finished for v in st.values()):
+        cap = cfg_int("HARD_CAP", 4)  # re-read: capacity changes in config.env apply without a restart
         # finished runners: DONE written, or the process died without one
         for k in [k for k, v in st.items() if v == "running"]:
             dl = done_line(*k)
