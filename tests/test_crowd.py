@@ -352,7 +352,7 @@ class Planning(unittest.TestCase):
 
 class Filing(unittest.TestCase):
     def test_merge_confirmers_labels_and_github_filing(self):
-        r = Run("file", lanes("maya", "leo"), config='DAYS=1 FILE_CMD="" TRACKERS="app=owner/app"', tester={
+        r = Run("file", lanes("maya", "leo"), config='DAYS=1 FILE_CMD="" TRACKERS="app=owner/app" FILE_AUTO=yes', tester={
             "maya": {"findings": [{"title": "Archive button deletes the whole conversation thread", "route": "/inbox"},
                                   {"title": "REFUSE weird spacing on cards", "route": "/cards"},
                                   {"title": "REPAIR login banner shows twice", "route": "/login"},
@@ -390,6 +390,42 @@ class Filing(unittest.TestCase):
         new = r.calls()[n:]
         self.assertEqual([c for c in new if c["kind"] in ("tester", "gh-body")], [])
         self.assertEqual([c["step"] for c in new if c["kind"] == "step"], [], "nothing changed, so no report either")
+
+    def test_the_file_plan_checks_issues_and_comments_and_waits_for_approval(self):
+        r = Run("fileplan", lanes("maya"), config='DAYS=1 FILE_CMD="" TRACKERS="app=owner/app"', tester={"maya": {"findings": [
+            {"title": "Archive button deletes the whole conversation thread"}, {"title": "Search ignores accents in names"},
+            {"title": "Export drops the last row of the file"}, {"title": "Coupon field accepts any length"}]}})
+        snap = [{"number": 41, "title": "Search ignores accents in names", "state": "OPEN", "body": "", "labels": [],
+                 "comments": [], "url": ""},
+                {"number": 12, "title": "Export drops the last row of the file", "state": "CLOSED", "stateReason": "COMPLETED",
+                 "body": "", "labels": [], "comments": [], "url": ""},
+                {"number": 30, "title": "Coupon field length", "state": "CLOSED", "stateReason": "NOT_PLANNED",
+                 "body": "Coupon field accepts any length", "labels": [],
+                 "comments": [{"author": {"login": "dev"}, "createdAt": "2026-10-02", "body": "This is intended."}], "url": ""}]
+        json.dump(snap, open(r.path("snap.json"), "w"))
+        r.env["FAKE_GH_SNAPSHOT"] = r.path("snap.json")
+        r.crowd("run")
+        res = r.crowd("file")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(r.calls(kind="gh-body") + r.calls(kind="gh-comment"), [], "nothing is sent before approval")
+        self.assertIn("nothing sent", r.read("logs", "crowd.log"))
+        md = r.read("file-plan.md")
+        for part in ("New issues", "Comment on an open issue", "Regression of a closed issue", "Skipped", "This is intended."):
+            self.assertIn(part, md)
+        snapshot = json.load(open(r.path("state", "issues-snapshot-app.json")))
+        self.assertEqual(snapshot[2]["comments"][0]["text"], "This is intended.", "comments are part of the snapshot")
+        res = r.crowd("approve")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        filed = json.load(open(r.path("state", "filed.json")))
+        acts = sorted((v["action"], v.get("target")) for v in filed.values())
+        self.assertEqual(acts, [("comment", 41), ("create", None), ("regression", 12)])
+        reg = [c for c in r.calls(kind="gh-body") if c["title"].startswith("Export")][0]
+        self.assertIn("**Regression of #12**", reg["body"])
+        self.assertIn("by #5", reg["body"])
+        self.assertIn("**Also hit by Maya**", r.calls(kind="gh-comment")[0]["body"])
+        refused = json.load(open(r.path("state", "refused.json")))
+        self.assertTrue(any(v["reason"].startswith("skipped: intended (#30)") for v in refused.values()))
+        self.assertEqual(len([c for c in r.calls(kind="step") if c["step"].startswith("file-plan:")]), 1, "one batch call")
 
     def test_file_cmd_hook(self):
         r = Run("hook", lanes("maya"), config="DAYS=1", tester={"maya": {"findings": [{"title": "Search ignores accents"}]}})
@@ -439,7 +475,7 @@ class EdgeCases(unittest.TestCase):
         self.assertEqual(len(r.verdict("maya", 1)["verified_findings"]), 1)
 
     def test_a_filing_error_is_retried_and_an_existing_title_is_not_filed_twice(self):
-        r = Run("fileerr", lanes("maya"), config='DAYS=1 FILE_CMD="" TRACKERS="app=owner/app"', tester={"maya": {"findings": [
+        r = Run("fileerr", lanes("maya"), config='DAYS=1 FILE_CMD="" TRACKERS="app=owner/app" FILE_AUTO=yes', tester={"maya": {"findings": [
             {"title": "Archive button deletes the whole conversation thread"}, {"title": "Search ignores accents in names"}]}})
         r.env["FAKE_GH_FAIL_ONCE"] = "1"
         r.env["FAKE_GH_EXISTING"] = "Search ignores accents in names"
@@ -452,6 +488,7 @@ class EdgeCases(unittest.TestCase):
         filed = json.load(open(r.path("state", "filed.json")))
         self.assertEqual(len(filed), 2)
         self.assertEqual([c["title"] for c in r.calls(kind="gh-body")], ["Archive button deletes the whole conversation thread"])
+        self.assertEqual([c["target"] for c in r.calls(kind="gh-comment")], ["77"], "the open issue gets a comment instead")
 
     def test_status_counts_claude_tester_sessions(self):
         r = Run("status", lanes("maya"), config="DAYS=1")

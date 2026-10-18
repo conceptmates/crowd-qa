@@ -133,6 +133,23 @@ def model_step(prompt, resumed=False):
         json.dump({"in_character": 80, "notes": "fine", "findings": fs}, open(out, "w"))
     elif step == "dedupe":
         json.dump({"same": []}, open(out, "w"))
+    elif step.startswith("file-plan:"):
+        bugs = json.loads(re.search(r"Bugs: (\[.*\])\nAnswer", prompt, re.S).group(1))
+        plan = []
+        for b in bugs:
+            same = next((i for i in b["existing"] if i["title"].lower() == b["title"].lower()), None)
+            noted = next((i for i in b["existing"] if any("intended" in c for c in i["comments"])), None)
+            if noted:
+                plan.append({"key": b["key"], "action": "skip", "target": noted["number"], "reason": "intended",
+                             "quote": "This is intended."})
+            elif same and same["state"] == "OPEN":
+                plan.append({"key": b["key"], "action": "comment", "target": same["number"], "reason": "open", "quote": ""})
+            elif same:
+                plan.append({"key": b["key"], "action": "regression", "target": same["number"], "reason": "closed fixed",
+                             "quote": ""})
+            else:
+                plan.append({"key": b["key"], "action": "create", "target": None, "reason": "new", "quote": ""})
+        json.dump({"plan": plan}, open(out, "w"))
     elif step.startswith("verify:"):
         title = re.search(r'"title": "([^"]*)"', prompt).group(1)
         if "REFUSE" in title:
@@ -190,6 +207,20 @@ def main():
             open(LOG + ".ghfail", "w").close()
             print("HTTP 502: server error", file=sys.stderr)
             sys.exit(1)
+        if ARGS[:2] == ["issue", "list"] and any("comments" in a for a in ARGS):
+            snap = json.load(open(os.environ["FAKE_GH_SNAPSHOT"])) if os.environ.get("FAKE_GH_SNAPSHOT") else []
+            if os.environ.get("FAKE_GH_EXISTING"):
+                snap.append({"number": 77, "title": os.environ["FAKE_GH_EXISTING"], "state": "OPEN", "body": "",
+                             "url": "https://github.com/owner/app/issues/77", "labels": [], "comments": []})
+            print(json.dumps(snap))
+            return
+        if ARGS[:2] == ["issue", "comment"]:
+            record("gh-comment", target=ARGS[2], body=open(ARGS[ARGS.index("--body-file") + 1]).read())
+            print(f"https://github.com/owner/app/issues/{ARGS[2]}#issuecomment-1")
+            return
+        if ARGS[:2] == ["issue", "view"] and any("closedByPullRequestsReferences" in a for a in ARGS):
+            print(json.dumps({"closedAt": "2026-10-01T00:00:00Z", "closedByPullRequestsReferences": [{"number": 5}]}))
+            return
         if ARGS[:2] == ["issue", "list"] and any("in:title" in a for a in ARGS) and os.environ.get("FAKE_GH_EXISTING"):
             print(json.dumps([{"number": 77, "title": os.environ["FAKE_GH_EXISTING"], "url": "https://github.com/owner/app/issues/77"}]))
             return

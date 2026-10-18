@@ -775,16 +775,18 @@ def render_body(x, urls):
     return "\n".join(lines) + "\n"
 
 
-def verify(x, repo, attempt=1):
+def verify(x, repo, attempt=1, planned=False):
     """The model checks one merged bug before filing. High severity and unconfirmed causes go to ESCALATE_MODEL."""
     hard = SEV.get(x.get("severity"), 0) >= 3 or "not confirmed" in (x.get("mechanism") or "not confirmed")
     model = cfg("ESCALATE_MODEL", "opus") if hard else cfg("VERIFY_MODEL", "opus")
     effort = cfg("ESCALATE_EFFORT", "medium") if hard else cfg("VERIFY_EFFORT", "medium")
     cands = []
-    if repo and not cfg("FILE_CMD"):
+    if repo and not cfg("FILE_CMD") and not planned:
         q = " ".join(sorted(words(x["title"]), key=len, reverse=True)[:5])
         r = sh(["gh", "issue", "list", "-R", repo, "--state", "all", "--search", q, "--limit", "10", "--json", "number,title"])
         cands = jload_str(r.stdout) or []
+    dup_line = ("Duplicates were already checked against every issue and comment in the repo; do not refuse for that."
+                if planned else f"Possible existing issues: {json.dumps(cands)}.")
     out = os.path.join(RUN, "state", f"verify-{x['key']}-{attempt}.json")
     return llm(f"verify:{x['key']}", f"""You check one crowd-QA bug before it is filed. Run dir: {RUN}. Source: {cfg('SOURCE_PATHS')}.
 Bug: {json.dumps({k: x.get(k) for k in ('title', 'severity', 'route', 'steps', 'expected', 'actual', 'mechanism', 'screenshots', 'confirmers', 'reporter')}, indent=1)}
@@ -794,10 +796,146 @@ Bug: {json.dumps({k: x.get(k) for k in ('title', 'severity', 'route', 'steps', '
 2. Source: open the cited file:line at the current checkout and confirm the cause is still there. If nothing is
    cited, find the code that handles this behaviour and name it, or say "not confirmed".
 3. Rule out intended behaviour ({RUN}/context.md and the project's docs), a stack fault ({RUN}/stack-faults.md),
-   and an existing issue. Possible existing issues: {json.dumps(cands)}.
+   and an existing issue. {dup_line}
 Answer {{"verdict": "file|refuse|repair", "reason": "<one sentence>", "likely_cause": "<file:line and why, or not
 confirmed>", "duplicate_of": "<issue number or empty>", "repair_screenshots": []}}.""",
                model, effort, out, ("verdict", "reason"))
+
+
+def snapshot(key, repo):
+    """Every issue in the repo, open and closed, with body and comments, saved once per hour. Duplicates are judged
+    against this, so a bug already reported in a comment or closed as intended is not filed again."""
+    out = os.path.join(RUN, "state", f"issues-snapshot-{key}.json")
+    old = jload(out)
+    if old is not None and time.time() - os.path.getmtime(out) < float(cfg("SNAPSHOT_MAX_AGE_S", "3600")):
+        return old
+    r = sh(["gh", "issue", "list", "-R", repo, "--state", "all", "--limit", cfg("SNAPSHOT_LIMIT", "3000"), "--json",
+            "number,title,body,state,stateReason,labels,closedAt,url,comments"])
+    items = jload_str(r.stdout)
+    if r.returncode or not isinstance(items, list):
+        log(f"file: could not read the issues of {repo} ({r.stderr.strip()[:200]}); planning against an empty list")
+        items = []
+    snap = [{"number": i["number"], "title": i.get("title", ""), "state": i.get("state", ""),
+             "reason": i.get("stateReason") or "", "closed": i.get("closedAt") or "", "url": i.get("url", ""),
+             "labels": [lab.get("name") for lab in i.get("labels", [])], "body": (i.get("body") or "")[:4000],
+             "comments": [{"by": (c.get("author") or {}).get("login", ""), "at": c.get("createdAt", ""),
+                           "text": (c.get("body") or "")[:1500]} for c in i.get("comments", [])]} for i in items]
+    jsave(out, snap)
+    log(f"file: snapshot of {repo}: {len(snap)} issues with {sum(len(i['comments']) for i in snap)} comments")
+    return snap
+
+
+def candidates(x, snap, n=8):
+    """The existing issues most like this bug by words in the title, body and comments. Code narrows, the model decides."""
+    want = words(" ".join([x.get("title", ""), x.get("route", ""), x.get("actual", "")]))
+    scored = []
+    for i in snap:
+        have = words(i["title"]) | words(i["body"][:1500]) | words(" ".join(c["text"][:400] for c in i["comments"]))
+        title = similar(x.get("title", ""), i["title"])
+        cover = len(want & have) / len(want) if want else 0.0
+        if title >= 0.2 or cover >= 0.35:
+            scored.append((title * 2 + cover, i))
+    scored.sort(key=lambda t: -t[0])
+    return [i for _, i in scored[:n]]
+
+
+PLAN_ACTIONS = ("create", "comment", "regression", "skip")
+
+
+def make_plan(key, repo, bugs):
+    """One look at the whole batch against the repo's issues: create, comment on an open issue, file a regression of a
+    closed one, or skip. Written to state/file-plan.json and file-plan.md for a person to approve."""
+    snap = snapshot(key, repo)
+    plan = jload(os.path.join(RUN, "state", "file-plan.json"), {})
+    todo = [x for x in bugs if x["key"] not in plan]
+    size = cfg_int("PLAN_BATCH", 30)
+    for start in range(0, len(todo), size):
+        batch = todo[start:start + size]
+        pack = []
+        for x in batch:
+            cands = candidates(x, snap)
+            if not cands:
+                plan[x["key"]] = {"action": "create", "target": None, "reason": "no similar issue in the repo",
+                                  "quote": "", "title": x["title"], "tracker": key}
+                continue
+            pack.append({"key": x["key"], "title": x["title"], "route": x.get("route"), "actual": x.get("actual", "")[:500],
+                         "expected": x.get("expected", "")[:300],
+                         "existing": [{"number": i["number"], "title": i["title"], "state": i["state"], "reason": i["reason"],
+                                       "closed": i["closed"], "labels": i["labels"], "body": i["body"][:800],
+                                       "comments": [f"{c['by']} ({c['at'][:10]}): {c['text'][:500]}" for c in i["comments"][-10:]]}
+                                      for i in cands]})
+        if not pack:
+            continue
+        out = os.path.join(RUN, "state", f"plan-{key}-{start}.json")
+        ans = llm(f"file-plan:{key}:{start}", f"""Crowd-QA found these bugs. Before anything is filed in {repo}, decide for each
+one what to do, judged against the existing issues listed with it (open and closed, with their comments). Read the
+comments: that is where "can't reproduce", "this is intended", "fixed in #n", "won't fix" or a second report usually is.
+Intended behaviour for this product is in {RUN}/context.md.
+Actions:
+- "create": no existing issue is the same bug.
+- "comment": an OPEN issue (or a comment on one) already reports the same bug; target = that issue number.
+- "regression": a CLOSED issue was the same bug and was closed as fixed (completed), but the crowd still hits it;
+  target = the closed issue number.
+- "skip": a closed issue or a comment says this behaviour is intended, won't be fixed, or a duplicate that was
+  rejected; target = that issue number. Quote the sentence that says so.
+Same bug means the same symptom on the same screen or the same root cause, not just the same area.
+Bugs: {json.dumps(pack, indent=1)}
+Answer {{"plan": [{{"key": "<bug key>", "action": "create|comment|regression|skip", "target": <issue number or null>,
+"reason": "<one sentence>", "quote": "<the sentence from the issue or comment that decided it, or empty>"}}]}}.""",
+                  cfg("PLAN_MODEL", cfg("VERIFY_MODEL", "opus")), cfg("PLAN_EFFORT", "medium"), out, ("plan",))
+        nums = {i["number"] for i in snap}
+        for a in (ans or {}).get("plan", []):
+            k, act = a.get("key"), a.get("action")
+            if k not in {x["key"] for x in batch} or act not in PLAN_ACTIONS:
+                continue
+            if act != "create" and a.get("target") not in nums:
+                act = "create"   # a target that is not in the repo cannot be commented on or skipped for
+            plan[k] = {"action": act, "target": a.get("target") if act != "create" else None,
+                       "reason": a.get("reason", ""), "quote": a.get("quote", ""),
+                       "title": next(x["title"] for x in batch if x["key"] == k), "tracker": key}
+        jsave(os.path.join(RUN, "state", "file-plan.json"), plan)
+    return plan
+
+
+def write_plan_md(plan, tr):
+    rows = {a: [] for a in PLAN_ACTIONS}
+    for k, p in plan.items():
+        rows[p["action"]].append((k, p))
+    head = {"create": "New issues", "comment": "Comment on an open issue", "regression": "Regression of a closed issue",
+            "skip": "Skipped"}
+    lines = [f"# File plan, {cfg('RUN_LABEL', 'crowd-qa')}", "",
+             " · ".join(f"{len(rows[a])} {head[a].lower()}" for a in PLAN_ACTIONS), "",
+             f"Nothing has been sent to GitHub. To go ahead: `python3 {SCRIPTS}/crowd.py {RUN} approve`. To change a line, "
+             f"edit `state/file-plan.json` (action: create|comment|regression|skip) first.", ""]
+    for a in PLAN_ACTIONS:
+        if not rows[a]:
+            continue
+        lines += [f"## {head[a]} ({len(rows[a])})", "", "| bug | repo | target | why |", "|---|---|---|---|"]
+        for k, p in rows[a]:
+            repo = tr.get(p["tracker"], p["tracker"])
+            tgt = f"[#{p['target']}](https://github.com/{repo}/issues/{p['target']})" if p.get("target") else ""
+            why = p.get("reason", "") + (f" <br>> {p['quote'][:240]}" if p.get("quote") else "")
+            lines.append(f"| {p['title'].replace('|', '/')} | {p['tracker']} | {tgt} | {why.replace('|', '/')} |")
+        lines.append("")
+    with open(os.path.join(RUN, "file-plan.md"), "w") as f:
+        f.write("\n".join(lines))
+
+
+def comment_body(x, urls, target):
+    cid = x.get("reporter", "")
+    who = card_field(cid, "Name") or cid
+    lines = [f"**Also hit by {who}** in the {cfg('RUN_DATE', time.strftime('%Y-%m-%d'))} crowd run "
+             f"(day {x.get('day', 1)}, `{x.get('route', '')}`).", "", f"> \"{x.get('voice', '').strip()}\"", "",
+             "**Steps**", ""] + [f"{i}. {s}" for i, s in enumerate(x.get("steps", []), 1)]
+    lines += ["", f"**Actual:** {x.get('actual', '')}"]
+    for c in x.get("confirmers", []):
+        lines.append(f"- Also: **{card_field(c.get('id', ''), 'Name') or c.get('id')}**: \"{c.get('line', '')}\"")
+    lines += [""] + [f"![]({u})" for s, u in urls]
+    return "\n".join(lines) + "\n"
+
+
+def plan_approved():
+    return cfg("FILE_AUTO", "no") == "yes" or os.path.exists(os.path.join(RUN, "state", "FILE_PLAN_APPROVED"))
 
 
 def file_issues():
@@ -813,6 +951,20 @@ def file_issues():
     todo = [x for x in issues if x["key"] not in done and x["key"] not in refused]
     for x in todo:
         x["tracker"] = x.get("repo") if x.get("repo") in tr else keys[0]
+    plan = {}
+    if not hook and todo:
+        for key in keys:
+            mine = [x for x in todo if x["tracker"] == key]
+            if mine:
+                plan = make_plan(key, tr.get(key, key), mine)
+        write_plan_md(plan, tr)
+        if not plan_approved():
+            n = {a: sum(1 for k, p in plan.items() if p["action"] == a and k in {x["key"] for x in todo}) for a in PLAN_ACTIONS}
+            log(f"file: plan written to {RUN}/file-plan.md ({n}); nothing sent. Approve with: crowd.py {RUN} approve")
+            notify = cfg("NOTIFY_CMD")
+            if notify:
+                sh(["bash", "-c", f'{notify} "$1"', "_", f"crowd-qa file plan ready for approval: {RUN}/file-plan.md"])
+            return
     for key in keys:
         mine = [x for x in todo if x["tracker"] == key]
         if not mine:
@@ -820,26 +972,26 @@ def file_issues():
         repo = tr.get(key, key)
         urls = {}
         if not hook:
-            for lab in sorted({lab for x in mine for lab in x["labels"]}):
+            labs = {lab for x in mine for lab in x["labels"]}
+            if any(plan.get(x["key"], {}).get("action") == "regression" for x in mine):
+                labs.add("regression")
+            for lab in sorted(labs):
                 sh(["gh", "label", "create", "--force", "-R", repo, lab])
-            urls = push_evidence(key, repo, mine)
+            urls = push_evidence(key, repo, [x for x in mine if plan.get(x["key"], {}).get("action") != "skip"])
 
         def one(x):
-            if not hook:
-                r = sh(["gh", "issue", "list", "-R", repo, "--state", "all", "--search", f'"{x["title"]}" in:title',
-                        "--limit", "5", "--json", "number,title,url"])
-                same = next((i for i in (jload_str(r.stdout) or []) if i.get("title", "").strip().lower() == x["title"].strip().lower()), None)
-                if same:
-                    return x, same.get("url") or f"https://github.com/{repo}/issues/{same['number']}", "already open with this title"
-            v = verify(x, repo)
+            p = plan.get(x["key"], {"action": "create"})
+            if p["action"] == "skip":
+                return x, None, f"skipped: {p.get('reason', '')} (#{p.get('target')})" + (f" \"{p['quote'][:200]}\"" if p.get("quote") else "")
+            v = verify(x, repo, planned=bool(plan))
             if v and v.get("verdict") == "repair":
-                fix = [p for p in v.get("repair_screenshots", []) if os.path.isfile(p)]
+                fix = [q for q in v.get("repair_screenshots", []) if os.path.isfile(q)]
                 if fix:
                     x["screenshots"] = fix
                     if not hook:
                         with LOCK:
                             urls.update(push_evidence(key, repo, [x]))
-                    v = verify(x, repo, 2)
+                    v = verify(x, repo, 2, planned=bool(plan))
                     if v and v.get("verdict") == "repair":
                         v = {"verdict": "refuse", "reason": "evidence still does not show the claim after repair"}
             if not v:
@@ -847,18 +999,37 @@ def file_issues():
             if v.get("verdict") != "file":
                 return x, None, v.get("reason", "refused")
             x["likely_cause"] = v.get("likely_cause")
+            if p["action"] == "comment":
+                bf = os.path.join(RUN, "state", f"comment-{x['key']}.md")
+                with open(bf, "w") as f:
+                    f.write(comment_body(x, urls.get(x["key"], []), p["target"]))
+                r = sh(["gh", "issue", "comment", str(p["target"]), "-R", repo, "--body-file", bf])
+                url = next((w for w in r.stdout.split() if "/issues/" in w), "")
+                if url:
+                    sh(["gh", "issue", "edit", str(p["target"]), "-R", repo,
+                        *sum((["--add-label", lab] for lab in x["labels"] if lab.startswith("persona:")), [])])
+                    return x, url, ""
+                return x, None, f"error: comment returned no URL: {r.stderr.strip()[:200]}"
             body = render_body(x, urls.get(x["key"], []))
+            labels = list(x["labels"])
+            if p["action"] == "regression":
+                prs = jload_str(sh(["gh", "issue", "view", str(p["target"]), "-R", repo, "--json",
+                                    "closedByPullRequestsReferences,closedAt"]).stdout)
+                fixed_by = ", ".join(f"#{q.get('number')}" for q in prs.get("closedByPullRequestsReferences", []) if q.get("number"))
+                body = (f"**Regression of #{p['target']}**, closed {str(prs.get('closedAt', ''))[:10]}"
+                        f"{f' by {fixed_by}' if fixed_by else ''}. The crowd still hits it on the current build.\n\n") + body
+                labels.append("regression")
             bf = os.path.join(RUN, "state", f"issue-{x['key']}.md")
             with open(bf, "w") as f:
                 f.write(body)
             if hook:
                 jf = os.path.join(RUN, "state", f"issue-{x['key']}.json")
-                jsave(jf, {"title": x["title"], "body": body, "labels": x["labels"], "repo": key, "screenshots": x["screenshots"]})
+                jsave(jf, {"title": x["title"], "body": body, "labels": labels, "repo": key, "screenshots": x["screenshots"]})
                 r = sh(["bash", "-c", f'{hook} "$1"', "_", jf])
                 url = (r.stdout.strip().splitlines() or [""])[-1]
             else:
                 r = sh(["gh", "issue", "create", "-R", repo, "--title", x["title"], "--body-file", bf,
-                        *sum((["--label", lab] for lab in x["labels"]), [])])
+                        *sum((["--label", lab] for lab in labels), [])])
                 url = next((w for w in r.stdout.split() if "/issues/" in w), "")
                 if url and sh(["gh", "issue", "view", url, "--json", "number"]).returncode:
                     url = ""
@@ -869,12 +1040,15 @@ def file_issues():
         with cf.ThreadPoolExecutor(cfg_int("FILE_PARALLEL", 6)) as ex:
             for x, url, why in ex.map(one, mine):
                 with LOCK:
+                    act = plan.get(x["key"], {}).get("action", "create")
                     if url:
-                        done[x["key"]] = {"url": url, "title": x["title"], "tracker": key}
+                        done[x["key"]] = {"url": url, "title": x["title"], "tracker": key, "action": act,
+                                          "target": plan.get(x["key"], {}).get("target"), "reporter": x.get("reporter"),
+                                          "severity": x.get("severity")}
                         num = re.search(r"/issues/(\d+)", url)
                         with open(os.path.join(RUN, "filed.txt"), "a") as f:
                             f.write(f"{'#' + num.group(1) if num else url} {x['title']}\n")
-                        log(f"filed {url} {x['title']}")
+                        log(f"{'commented' if act == 'comment' else 'filed'} {url} {x['title']}")
                     elif why.startswith("error:"):
                         log(f"not filed yet: {x['title']} ({why}); the next run tries again")
                     else:
@@ -882,7 +1056,7 @@ def file_issues():
                         log(f"not filed: {x['title']} ({why})")
                     jsave(os.path.join(RUN, "state", "filed.json"), done)
                     jsave(os.path.join(RUN, "state", "refused.json"), refused)
-    log(f"file: {len(done)} filed, {len(refused)} refused")
+    log(f"file: {len(done)} filed or commented, {len(refused)} refused or skipped")
 
 
 # --------------------------------------------------------------------------------------------------- 5. report
@@ -975,6 +1149,13 @@ def main():
     os.makedirs(os.path.join(RUN, "state"), exist_ok=True)
     if CMD == "status":
         return status()
+    if CMD == "approve":
+        os.makedirs(os.path.join(RUN, "state"), exist_ok=True)
+        with open(os.path.join(RUN, "state", "FILE_PLAN_APPROVED"), "w") as f:
+            f.write(time.strftime("%Y-%m-%dT%H:%M:%S") + "\n")
+        log("file: plan approved")
+        sys.argv[2:3] = ["file"]
+        globals()["CMD"] = "file"
     if CMD == "makeup":
         if len(sys.argv) < 4:
             sys.exit("usage: crowd.py <run> makeup <new-run> [--scen-max N]")
