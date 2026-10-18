@@ -439,6 +439,133 @@ class Filing(unittest.TestCase):
         self.assertIn("**Expected**", sent["body"])
 
 
+class Fixing(unittest.TestCase):
+    def repo(self, r):
+        d = r.path("product-repo")
+        os.makedirs(d, exist_ok=True)
+        for c in (["init", "-q", "-b", "main"], ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]):
+            r.sh("git", "-C", d, *c)
+        return d
+
+    def fix_run(self, name, extra=""):
+        r = Run(name, lanes("maya", "leo"), config=f'DAYS=1 FILE_CMD="" TRACKERS="app=owner/app" FILE_AUTO=yes FIXING=on '
+                f'REVIEW_ENGINE=claude {extra}', tester={
+                    "maya": {"findings": [{"title": "Archive button deletes the whole conversation thread", "route": "/inbox"},
+                                          {"title": "Search ignores accents in names", "route": "/search"}]},
+                    "leo": {"findings": []}})
+        with open(r.path("config.env"), "a") as f:
+            f.write(f'REPOS="app={self.repo(r)}"\n')
+        return r
+
+    def roles(self, r):
+        return [c["role"] for c in r.calls(kind="job")]
+
+    def test_cli_runner_fix_review_recheck_and_retry_until_the_reporters_pass_it(self):
+        r = self.fix_run("fixcli", "RUNNER=cli")
+        r.env["FAKE_REVIEW_CHANGES_ONCE"] = "1"
+        r.env["FAKE_RECHECK_FAIL_ONCE"] = "1"
+        res = r.crowd("all", timeout=300)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(self.roles(r), ["fix", "review", "fix", "review", "recheck", "fix", "review", "recheck"])
+        jobs = r.calls(kind="job")
+        wt = r.path("fix", "wt", "inbox-flows")
+        self.assertTrue(all(c["cwd"] == os.path.realpath(wt) or c["cwd"] == wt for c in jobs), "every job runs in the area's worktree")
+        self.assertIn("fix/crowd-test-inbox-flows", r.sh("git", "-C", wt, "branch", "--show-current").stdout)
+        review = [c["prompt"] for c in jobs if c["role"] == "review"]
+        self.assertFalse(any("changed " in p for p in review), "the reviewer never sees the fixer's notes")
+        self.assertIn("no guard", review[1], "the second review checks the first review's comment")
+        recheck = [c["prompt"] for c in jobs if c["role"] == "recheck"]
+        self.assertIn("re-test: open the inbox", recheck[0])
+        self.assertFalse(any("changed " in p for p in recheck))
+        self.assertEqual(len(jobs[5]["keys"]), 1, "only the bug that failed the re-check goes back to the fixer")
+        self.assertIn("still deletes", jobs[5]["prompt"])
+        areas = json.load(open(r.path("state", "areas-detail.json")))
+        self.assertEqual(areas["inbox-flows"]["status"], "done")
+        self.assertEqual(set(areas["inbox-flows"]["verdicts"].values()), {"PASS"})
+        body = r.calls(kind="gh-pr-edit")[-1]["body"]
+        for part in ("| issue | reporter | re-check | note |", "### Fixes #", "Reported by **maya**", "**Cause:** src/app.js:10",
+                     "-before.png", "-after.png", "-recheck.png", "**Re-check by maya: PASS.**", "<summary>Checks",
+                     "<summary>Review</summary>", "no guard", "Generated with [Claude Code]"):
+            self.assertIn(part, body)
+        prs = json.load(open(r.path("state", "prs.json")))
+        self.assertEqual(prs["inbox-flows"]["recheck"], {"pass": 2, "partial": 0, "fail": 0})
+        self.assertIn("## Fix pull requests", r.read("state", "report-pack.md"))
+        self.assertIn("fix areas: inbox-flows=done", r.crowd("status").stdout)
+
+    def test_a_disputed_review_comment_goes_to_a_bout_and_the_loser_drops_it(self):
+        r = self.fix_run("fixbout", "RUNNER=cli")
+        r.env.update(FAKE_REVIEW_CHANGES_ONCE="1", FAKE_REBUT="1", FAKE_BOUT_WINNER="b")
+        res = r.crowd("all", timeout=300)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        bouts = [json.load(open(p)) for p in glob.glob(r.path("state", "bouts", "review-*.json"))]
+        self.assertEqual(len(bouts), 1)
+        self.assertEqual((bouts[0]["winner"], bouts[0]["a"], bouts[0]["b"]), ("b", "reviewer", "fixer"))
+        self.assertEqual(len(bouts[0]["rounds"]), 2, "the given claim and answer, then one more round")
+        review2 = [c["prompt"] for c in r.calls(kind="job") if c["role"] == "review"][1]
+        self.assertIn("must not be raised again", review2)
+        self.assertIn("Disputes settled by a judge", r.calls(kind="gh-pr-edit")[-1]["body"])
+
+    def test_a_bug_another_character_could_not_reproduce_meets_them_in_a_bout_before_filing(self):
+        r = Run("cantrepro", lanes("maya"), config='DAYS=1 FILE_CMD="" TRACKERS="app=owner/app" FILE_AUTO=yes',
+                tester={"maya": {"findings": [{"title": "Export drops the last row of the file"}]}})
+        r.crowd("run")
+        r.crowd("dedupe")
+        issues = json.load(open(r.path("state", "issues.json")))
+        issues[0]["cant_repro"] = ["**Leo** could not reproduce: the export had every row."]
+        json.dump(issues, open(r.path("state", "issues.json"), "w"))
+        r.env["FAKE_BOUT_WINNER"] = "a"
+        r.crowd("file")
+        self.assertEqual(r.calls(kind="gh-body"), [])
+        self.assertIn("sided with the can't-repro report", json.dumps(json.load(open(r.path("state", "refused.json")))))
+        b = json.load(open(glob.glob(r.path("state", "bouts", "square-*.json"))[0]))
+        self.assertEqual((b["a"], b["b"], b["winner"]), ("can't-repro", "Maya", "a"))
+
+    def test_retries_run_out_and_the_pr_is_labelled_needs_human(self):
+        r = self.fix_run("fixhuman", "RUNNER=cli FIX_RETRIES=0")
+        r.env["FAKE_RECHECK_FAIL_ONCE"] = "1"
+        r.crowd("all", timeout=300)
+        self.assertEqual(json.load(open(r.path("state", "areas-detail.json")))["inbox-flows"]["status"], "needs-human")
+        self.assertTrue([c for c in r.calls(kind="gh") if c["args"][:2] == ["pr", "edit"] and "needs-human" in c["args"]])
+
+    def test_t3_runner_jobs_are_launched_by_the_session_and_reviews_reuse_the_fixers_worktree(self):
+        r = self.fix_run("fixt3", "RUNNER=t3")
+        res = r.crowd("all", timeout=300)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(r.calls(kind="job"), [], "crowd.py starts no agent itself")
+        self.assertIn("jobs ready for the t3 runner", r.read("logs", "crowd.log"))
+        nxt = json.loads(r.crowd("jobs", "next").stdout)
+        self.assertEqual([(j["role"], j["launch"]) for j in nxt], [("fix", "new-worktree")])
+        self.assertIn("# Fix brief", nxt[0]["prompt_text"])
+        self.assertIn("the worktree this thread started in", nxt[0]["prompt_text"])
+        self.assertEqual(json.loads(r.crowd("jobs", "next").stdout), [], "a claimed job is not handed out twice")
+        wt = r.path("t3-worktree")
+        os.makedirs(wt)
+        r.crowd("jobs", "start", nxt[0]["id"], "--runner", "t3", "--model", "claude-team3:claude-opus-5-5",
+                "--thread", "T-1", "--worktree", wt)
+        json.dump({"fixed": nxt[0]["keys"], "branch": nxt[0]["branch"], "pr": "https://github.com/owner/app/pull/9",
+                   "worktree": wt}, open(nxt[0]["result"], "w"))
+        done = json.loads(r.crowd("jobs", "done", nxt[0]["id"]).stdout)
+        self.assertEqual(done["ready"], 1)
+        rev = json.loads(r.crowd("jobs", "next").stdout)[0]
+        self.assertEqual((rev["role"], rev["launch"], rev["worktree"]), ("review", "existing-worktree", wt))
+        self.assertIn(wt, rev["prompt_text"])
+        r.crowd("jobs", "start", rev["id"], "--thread", "T-2")
+        self.assertIn("1 jobs queued again", r.crowd("jobs", "requeue-running").stdout, "a session that died leaves the job to rerun")
+        jobs = json.load(open(r.path("state", "jobs.json")))
+        self.assertEqual(jobs[nxt[0]["id"]]["model"], "claude-team3:claude-opus-5-5")
+        self.assertIn("T-1", r.crowd("jobs", "list").stdout)
+
+    def test_a_job_without_a_valid_result_is_tried_again_then_left_to_a_person(self):
+        r = self.fix_run("fixbad", "RUNNER=t3")
+        r.crowd("all", timeout=300)
+        j = json.loads(r.crowd("jobs", "next").stdout)[0]
+        r.crowd("jobs", "done", j["id"])
+        self.assertEqual(json.load(open(r.path("state", "jobs.json")))[j["id"]]["status"], "queued")
+        r.crowd("jobs", "done", j["id"])
+        self.assertEqual(json.load(open(r.path("state", "jobs.json")))[j["id"]]["status"], "failed")
+        self.assertEqual(json.load(open(r.path("state", "areas-detail.json")))["inbox-flows"]["status"], "needs-human")
+
+
 class EdgeCases(unittest.TestCase):
     def test_a_rate_limited_model_step_waits_and_tries_again(self):
         r = Run("limit", lanes("maya"), plans=False, config="DAYS=1 LLM_LIMIT_WAIT_S=0.2")

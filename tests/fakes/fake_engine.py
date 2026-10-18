@@ -160,9 +160,57 @@ def model_step(prompt, resumed=False):
         else:
             ans = {"verdict": "file", "reason": "holds up", "likely_cause": "src/app.js:10"}
         json.dump(ans, open(out, "w"))
+    elif step == "group":
+        bugs = json.loads(re.search(r"Bugs: (\[.*\])\nAnswer", prompt, re.S).group(1))
+        json.dump({"areas": [{"name": "Inbox flows", "tracker": bugs[0]["tracker"], "bugs": [b["key"] for b in bugs],
+                              "files": ["src/app.js"]}]}, open(out, "w"))
+    elif step.startswith("bout:"):
+        if step.endswith(":judge"):
+            json.dump({"winner": os.environ.get("FAKE_BOUT_WINNER", "b"), "scores": {"a": 40, "b": 70},
+                       "reason": "the guard is there"}, open(out, "w"))
+        else:
+            json.dump({"text": "point " + step}, open(out, "w"))
     elif step == "report":
         open(out, "w").write("# Launch report\nVerdict: fine.\n")
     print(json.dumps({"total_cost_usd": 0.01, "num_turns": 2, "result": "DONE"}))
+
+
+def job_agent(prompt):
+    """A fix, review or re-check job (prompt from templates/*-brief.md): writes the result the brief asks for.
+    $FAKE_REVIEW_CHANGES_ONCE: the first review asks for changes. $FAKE_REBUT: the fixer disputes that comment.
+    $FAKE_RECHECK_FAIL_ONCE: the first re-check fails the first bug."""
+    role = {"# Fix brief": "fix", "# Review brief": "review", "# Re-check brief": "recheck"}[prompt.split("\n", 1)[0].strip()]
+    res = re.search(r"write `([^`]+result\.json)`", prompt, re.I).group(1)
+    keys = re.findall(r"- #(\d+) `([0-9a-f]+)` reported by \*\*([^*]+)\*\*", prompt)
+    flag = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(res))), ".fake-" + role)
+    record("job", role=role, result=res, keys=[k for _, k, _ in keys], cwd=os.getcwd(), prompt=prompt)
+    if role == "fix":
+        rebut = os.environ.get("FAKE_REBUT") and "Review comments to address" in prompt
+        ans = {"branch": re.search(r"Branch: `([^`]+)`", prompt).group(1), "worktree": os.getcwd(),
+               "pr": "https://github.com/owner/app/pull/9", "fixed": [k for _, k, _ in keys],
+               "changes": {k: f"changed {k}" for _, k, _ in keys}, "cause": {k: "src/app.js:10" for _, k, _ in keys},
+               "evidence": {k: {"before": f"https://e/{n}-before.png?raw=true", "after": f"https://e/{n}-after.png?raw=true"}
+                            for n, k, _ in keys},
+               "retest": {k: "open the inbox and archive one" for _, k, _ in keys},
+               "checks": {"cmd": "npm test", "ok": True, "tail": "all green"}, "needs_backend": [], "not_changed": [],
+               "rebuttals": [{"comment": 0, "text": "the handler at src/app.js:12 already guards it"}] if rebut else []}
+    elif role == "review":
+        first = os.environ.get("FAKE_REVIEW_CHANGES_ONCE") and not os.path.exists(flag)
+        open(flag, "w").close()
+        ans = {"verdict": "changes" if first else "approve", "summary": "looked at the diff",
+               "comments": [{"file": "src/app.js", "line": 12, "severity": "blocker", "bug": "", "text": "no guard"}] if first else []}
+    else:
+        first = os.environ.get("FAKE_RECHECK_FAIL_ONCE") and not os.path.exists(flag)
+        open(flag, "w").close()
+        ans = {"results": [{"key": k, "issue": int(n), "persona": who, "verdict": "FAIL" if first and i == 0 else "PASS",
+                            "note": "still deletes" if first and i == 0 else "works now", "shot": f"https://e/{n}-recheck.png?raw=true",
+                            "frontend_fixable": True, "comment": f"https://github.com/owner/app/issues/{n}#issuecomment-2"}
+                           for i, (n, k, who) in enumerate(keys)]}
+    json.dump(ans, open(res, "w"))
+    print(json.dumps({"total_cost_usd": 0.02, "num_turns": 3, "result": "DONE"}))
+
+
+JOB_HEADS = ("# Fix brief", "# Review brief", "# Re-check brief")
 
 
 def active_profile(tool):
@@ -231,6 +279,8 @@ def main():
             print(f"https://github.com/owner/app/issues/{100 + n}")
         elif ARGS[:2] == ["issue", "list"]:
             print("[]")
+        elif ARGS[:2] == ["pr", "edit"] and "--body-file" in ARGS:
+            record("gh-pr-edit", pr=ARGS[2], body=open(ARGS[ARGS.index("--body-file") + 1]).read())
         return
     if NAME == "git":
         record("git")
@@ -240,6 +290,12 @@ def main():
             return
         real = next(p for p in ("/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git") if os.path.exists(p))
         os.execv(real, [real] + ARGS)
+    if NAME == "codex" and ARGS[:1] == ["exec"] and not ARGS[1:2] == ["resume"]:
+        prompt = sys.stdin.read()
+        if prompt.startswith(JOB_HEADS):
+            return job_agent(prompt)
+        print(f"session id: {uuid.uuid4()}")
+        return tester(prompt)
     if NAME == "codex":
         print(f"session id: {uuid.uuid4()}")
         if ARGS[:2] == ["exec", "resume"]:
@@ -261,6 +317,8 @@ def main():
             return model_step(open(saved).read(), resumed=True)
     if prompt.startswith("[crowd-qa step="):
         return model_step(prompt)
+    if prompt.startswith(JOB_HEADS):
+        return job_agent(prompt)
     if not prompt.strip():  # --resume with a message argument
         prompt = open(os.path.join(os.environ["OUT"], "prompt.md")).read()
     return tester(prompt)

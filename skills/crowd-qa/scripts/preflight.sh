@@ -157,4 +157,24 @@ left=$(pgrep -f "run-tester.sh $RUN " | wc -l | tr -d ' ')
 [ "$left" = 0 ] && ok "no runners alive" || ok "$left runner(s) still alive from an earlier start: crowd.py waits for them instead of starting a second copy"
 [ -f "$RUN/lanes.json" ] && ok "lanes.json: $(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))))" "$RUN/lanes.json") characters" || bad "lanes.json missing: [{\"id\", \"role\", \"surface\", \"depends_on\": []}, ...]"
 
+if [ "${FIXING:-off}" = on ]; then
+  case "${RUNNER:-auto}" in t3|subagent|cli|auto) ok "fix runner: ${RUNNER:-auto}" ;; *) bad "RUNNER=${RUNNER} is not t3, subagent, cli or auto" ;; esac
+  [ "${RUNNER:-auto}" = t3 ] || for t in ${TRACKERS:-}; do
+    k="${t%%=*}"; p=$(for r in ${REPOS:-}; do [ "${r%%=*}" = "$k" ] && echo "${r#*=}"; done)
+    if [ -n "$p" ] && git -C "$p" rev-parse --git-dir >/dev/null 2>&1; then ok "fix: local clone for $k at $p"
+    else bad "fix: no local clone for tracker $k in REPOS (\"$k=/path/to/clone\"); cli and subagent runners make worktrees from it"; fi
+  done
+  kinds=" ${TRACKER_KIND:-} "
+  if [ -z "${FE_DEV_CMD:-}" ] && ! echo "$kinds" | grep -q "=be "; then
+    bad "fix: FE_DEV_CMD is empty: frontend fixes cannot be run for before/after evidence or re-checks"
+  fi
+  echo "$kinds" | grep -q "=be " && { [ -n "${BE_DEPLOY_CMD:-}" ] && ok "fix: BE_DEPLOY_CMD set" || bad "fix: a backend tracker but BE_DEPLOY_CMD is empty"; }
+  [ -n "${CHECK_CMD:-}" ] || set | grep -q '^CHECK_CMD_' || echo "NOTE  fix: no CHECK_CMD; fixers will look for the repo's own checks"
+  for f in fix-brief review-brief recheck-brief; do [ -f "$RUN/templates/$f.md" ] || bad "fix: templates/$f.md missing"; done
+  if [ -n "${RECHECK_COMMENT_HOST:-}" ]; then
+    ssh -o BatchMode=yes -o ConnectTimeout=8 "$RECHECK_COMMENT_HOST" 'gh auth status' >/dev/null 2>&1 \
+      && ok "fix: re-check comments go out from gh on $RECHECK_COMMENT_HOST" || bad "fix: gh on $RECHECK_COMMENT_HOST is not logged in"
+  fi
+fi
+
 exit $fail

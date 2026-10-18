@@ -5,8 +5,11 @@ Everything else (scheduling, waiting, quota pauses, coverage, evidence checks, d
 issue bodies, evidence push, filing) is plain code, so no agent spends tokens waiting on a tester.
 
 usage:
-  crowd.py <run> all        plan, run, dedupe, file, report (each step skips work already on disk)
-  crowd.py <run> plan|run|dedupe|file|report
+  crowd.py <run> all        plan, run, dedupe, file, fix, report (each step skips work already on disk)
+  crowd.py <run> plan|run|dedupe|file|fix|report
+  crowd.py <run> approve    approve file-plan.md, then file
+  crowd.py <run> jobs next|start|done|fail|requeue-running|list   fix jobs, for a t3 or subagent runner
+  crowd.py <run> pr         rewrite every fix PR body from the results
   crowd.py <run> status     one screen: every character-day, model spend so far
   crowd.py <run> makeup <new-run>   a new run dir with only the scenarios this run never finished (scripts/makeup.py)
 
@@ -16,6 +19,8 @@ Everything it decides is on disk, so after a crash or a reboot the same command 
 Settings come from config.env (scripts/init-crowd.sh lists them).
 """
 import concurrent.futures as cf
+import contextlib
+import fcntl
 import glob
 import hashlib
 import json
@@ -65,7 +70,7 @@ POLL = float(cfg("POLL_S", "20"))
 
 def log(msg):
     line = f"{time.strftime('%H:%M:%S')} {msg}"
-    print(line, flush=True)
+    print(line, flush=True, file=sys.stderr if CMD == "jobs" else sys.stdout)   # jobs prints JSON on stdout
     os.makedirs(os.path.join(RUN, "logs"), exist_ok=True)
     with LOCK, open(os.path.join(RUN, "logs", "crowd.log"), "a") as f:
         f.write(line + "\n")
@@ -983,6 +988,14 @@ def file_issues():
             p = plan.get(x["key"], {"action": "create"})
             if p["action"] == "skip":
                 return x, None, f"skipped: {p.get('reason', '')} (#{p.get('target')})" + (f" \"{p['quote'][:200]}\"" if p.get("quote") else "")
+            if x.get("cant_repro") and cfg("BOUT_CANT_REPRO", "on") == "on":
+                who = card_field(x.get("reporter", ""), "Name") or x.get("reporter", "reporter")
+                bt = bout("square", "can't-repro", who, x["title"], " ".join(x["cant_repro"])[:1500],
+                          f"{x.get('actual', '')} Evidence: {', '.join(x.get('screenshots', []))}",
+                          f"Is this a real bug in the product? Steps: {json.dumps(x.get('steps', []))}. Intended behaviour: "
+                          f"{RUN}/context.md. Stack faults: {RUN}/stack-faults.md.")
+                if bt and bt["winner"] == "a":
+                    return x, None, f"a judge sided with the can't-repro report: {bt.get('reason', '')}"
             v = verify(x, repo, planned=bool(plan))
             if v and v.get("verdict") == "repair":
                 fix = [q for q in v.get("repair_screenshots", []) if os.path.isfile(q)]
@@ -1079,6 +1092,10 @@ def report():
             never.append(c["id"])
     pack += ["", f"Never tested: {', '.join(never) or 'nobody'}", "", "## Filed",
              *[f"- {v['url']} {v['title']}" for v in jload(os.path.join(RUN, "state", "filed.json"), {}).values()],
+             "", "## Fix pull requests",
+             *[f"- {k}: {v.get('url') or 'no PR'} ({v.get('status')}; re-check pass {v.get('recheck', {}).get('pass')}, "
+               f"partial {v.get('recheck', {}).get('partial')}, fail {v.get('recheck', {}).get('fail')})"
+               for k, v in jload(os.path.join(RUN, "state", "prs.json"), {}).items()],
              "", "## Refused at filing",
              *[f"- {v['title']}: {v['reason']}" for v in jload(os.path.join(RUN, "state", "refused.json"), {}).values()]]
     pp = os.path.join(RUN, "state", "report-pack.md")
@@ -1096,12 +1113,640 @@ and the square (python3 {SCRIPTS}/square.py {RUN} digest nobody --limit 300).
 Sections: a verdict line (would these {len(characters())} people keep using the product after launch week, and
 why); one short section per group of people (by role and need), with who got what they wanted, who gave up and
 where, and the issues that blocked them (linked); the three things to fix before launch, by how many people they
-hurt; what nobody could test and why. Quote characters sparingly. Plain prose, no hype words, no closing summary.""",
+hurt; the fix pull requests and what the reporters said when they re-tested them, if the pack lists any; what
+nobody could test and why. Quote characters sparingly. Plain prose, no hype words, no closing summary.""",
         cfg("REPORT_MODEL", "opus"), cfg("REPORT_EFFORT", "medium"), out, text=True)
     if ok:
         with open(sp, "w") as f:
             f.write(sig)
     log(f"report: {out}")
+
+
+# --------------------------------------------------------------------------------------------------- 6. fixing
+# After filing: the bugs are grouped into areas that do not share files, each area gets a fixer in its own worktree,
+# a reviewer who sees only the diff, and a re-check by the characters who reported its bugs. Failed re-checks go back
+# to the fixer (FIX_RETRIES), a fixer who disputes a review comment meets the reviewer in a bout, and the PR body is
+# written here from the results. crowd.py only writes job prompts and reads job results; who runs a job is the
+# runner: cli (crowd.py starts claude/codex itself), or t3 / subagent (the orchestrating session launches each
+# job with `crowd.py <run> jobs next` and reports back with `jobs start` / `jobs done`).
+ROLE_KEYS = {"fix": ("fixed", "branch"), "review": ("verdict", "comments"), "recheck": ("results",)}
+TERMINAL = ("done", "needs-human")
+
+
+_JL, _JD = threading.RLock(), {"depth": 0, "fd": None}
+
+
+@contextlib.contextmanager
+def jobs_lock():
+    """Job and area state is written by runner threads and by the orchestrating session's `jobs` calls: one writer
+    at a time, across processes (flock) and threads (re-entrant, since finishing a job queues the next one)."""
+    with _JL:
+        if _JD["depth"] == 0:
+            os.makedirs(os.path.join(RUN, "state"), exist_ok=True)
+            _JD["fd"] = open(os.path.join(RUN, "state", "jobs.lock"), "w")
+            fcntl.flock(_JD["fd"], fcntl.LOCK_EX)
+        _JD["depth"] += 1
+        try:
+            yield
+        finally:
+            _JD["depth"] -= 1
+            if _JD["depth"] == 0:
+                fcntl.flock(_JD["fd"], fcntl.LOCK_UN)
+                _JD["fd"].close()
+
+
+def fix_path(*p):
+    return os.path.join(RUN, "fix", *p)
+
+
+def jobs_load():
+    return jload(os.path.join(RUN, "state", "jobs.json"), {})
+
+
+def jobs_save(j):
+    jsave(os.path.join(RUN, "state", "jobs.json"), j)
+
+
+def areas_load():
+    return jload(os.path.join(RUN, "state", "areas-detail.json"), {})
+
+
+def areas_save(a):
+    jsave(os.path.join(RUN, "state", "areas-detail.json"), a)
+    jsave(os.path.join(RUN, "state", "areas.json"), {k: v["bugs"] for k, v in a.items()})
+
+
+def runner():
+    r = cfg("RUNNER", "auto")
+    return "cli" if r == "auto" else r
+
+
+def tracker_kind(key):
+    kinds = dict(i.split("=", 1) for i in cfg("TRACKER_KIND").split() if "=" in i)
+    return kinds.get(key) or ("be" if re.search(r"back|api|server", key) else "fe")
+
+
+def repos():
+    return dict(i.split("=", 1) for i in cfg("REPOS").split() if "=" in i)
+
+
+def slug(s):
+    return re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")[:30] or "misc"
+
+
+def bug_rows():
+    """Every filed bug the fix stage can work on: {key: {issue number, title, tracker, reporter, confirmers...}}."""
+    issues = {x["key"]: x for x in jload(os.path.join(RUN, "state", "issues.json"), [])}
+    out = {}
+    for k, v in jload(os.path.join(RUN, "state", "filed.json"), {}).items():
+        num = re.search(r"/issues/(\d+)", v.get("issue") or v.get("url", ""))
+        if not num:
+            continue
+        x = issues.get(k, {})
+        out[k] = {"key": k, "issue": int(num.group(1)), "title": v["title"], "tracker": v.get("tracker", "app"),
+                  "reporter": x.get("reporter") or v.get("reporter", ""), "route": x.get("route", ""),
+                  "severity": x.get("severity") or v.get("severity", ""), "cause": x.get("likely_cause") or x.get("mechanism", ""),
+                  "confirmers": [c.get("id") for c in x.get("confirmers", [])], "action": v.get("action", "create")}
+    return out
+
+
+def group():
+    """Areas that do not share files, one model call. Every filed bug lands in exactly one area."""
+    areas = areas_load()
+    if areas:
+        return areas
+    bugs = bug_rows()
+    if not bugs:
+        log("fix: nothing filed, nothing to fix")
+        return {}
+    out = os.path.join(RUN, "state", "group-answer.json")
+    ans = llm("group", f"""Group these filed bugs into fix areas. One fixer works on each area in its own git worktree, at the same
+time as the others, and opens one pull request, so two areas must not need to edit the same files. Keep bugs of
+different repos (tracker) in different areas. At most {cfg_int('FIX_AREA_MAX', 20)} bugs per area; prefer areas a person would
+name (auth, checkout, vendor-listings). Source code: {cfg('SOURCE_PATHS')}. Look at the code to see which files each bug
+touches before you group.
+Bugs: {json.dumps(list(bugs.values()), indent=1)}
+Answer {{"areas": [{{"name": "<short-slug>", "tracker": "<tracker key>", "bugs": ["<bug key>"], "files": ["<paths the
+fixes will likely touch>"]}}]}}.""", cfg("JUDGE_MODEL", "opus"), cfg("GROUP_EFFORT", "medium"), out, ("areas",))
+    seen = set()
+    for a in (ans or {}).get("areas", []):
+        keys = [k for k in a.get("bugs", []) if k in bugs and k not in seen]
+        if not keys:
+            continue
+        seen.update(keys)
+        name = slug(a.get("name"))
+        while name in areas:
+            name += "-2"
+        tr = bugs[keys[0]]["tracker"]
+        areas[name] = {"bugs": keys, "tracker": tr, "kind": tracker_kind(tr), "files": a.get("files", []),
+                       "status": "queued", "attempt": 1, "review_round": 1, "pr": "", "worktree": "",
+                       "branch": f"fix/{slug(cfg('RUN_LABEL', 'crowd'))}-{name}", "verdicts": {}, "unresolved": []}
+    for k, b in bugs.items():          # whatever the model left out gets an area of its own per tracker
+        if k not in seen:
+            name = f"misc-{slug(b['tracker'])}"
+            areas.setdefault(name, {"bugs": [], "tracker": b["tracker"], "kind": tracker_kind(b["tracker"]), "files": [],
+                                    "status": "queued", "attempt": 1, "review_round": 1, "pr": "", "worktree": "",
+                                    "branch": f"fix/{slug(cfg('RUN_LABEL', 'crowd'))}-{name}", "verdicts": {},
+                                    "unresolved": []})["bugs"].append(k)
+    for i, name in enumerate(sorted(areas)):
+        areas[name]["port"] = cfg_int("FIX_PORT_BASE", 3101) + i
+    areas_save(areas)
+    log(f"fix: {len(bugs)} bugs in {len(areas)} areas: " + ", ".join(f"{n} ({len(a['bugs'])})" for n, a in areas.items()))
+    return areas
+
+
+def stack_note(area, a, job):
+    port, app = a.get("port"), cfg("APP_URL", "the shared test stack (see context.md)")
+    fe = (f"Start a dev server for your checkout: `bash {SCRIPTS}/fix-stack.sh {RUN} up {area} <your checkout> {port}`, then "
+          f"use http://localhost:{port}. It runs against the shared backend. The base branch is running at {app}: take "
+          f"'before' screenshots there. Stop it at the end: `bash {SCRIPTS}/fix-stack.sh {RUN} down {area}`.")
+    be = (f"The backend is shared, so backend changes take turns. Push your branch, then "
+          f"`bash {SCRIPTS}/fix-stack.sh {RUN} be-take {job} {a['branch']}` deploys it (it waits while another fix holds the "
+          f"backend). Use the product at {app}. Always give it back when you are done, even after a failure: "
+          f"`bash {SCRIPTS}/fix-stack.sh {RUN} be-give {job}`. Take 'before' screenshots at {app} before be-take.")
+    return {"fe": fe, "be": be, "both": fe + "\n\n" + be}[a.get("kind", "fe")]
+
+
+def bug_lines(a, bugs, keys, retest=None):
+    out = []
+    for k in keys:
+        b = bugs.get(k)
+        if not b:
+            continue
+        also = f" (also hit by {', '.join(b['confirmers'])})" if b["confirmers"] else ""
+        out.append(f"  - #{b['issue']} `{k}` reported by **{b['reporter']}**{also}: {b['title']}"
+                   + (f"\n    re-test: {retest[k]}" if retest and retest.get(k) else ""))
+    return "\n".join(out)
+
+
+def latest(area, role, status="done"):
+    js = [j for j in jobs_load().values() if j["area"] == area and j["role"] == role and j["status"] == status]
+    return max(js, key=lambda j: (j["attempt"], j.get("round", 1), j.get("finished", ""))) if js else None
+
+
+def result_of(job):
+    return jload(job["result"], {}) if job else {}
+
+
+def new_job(role, area, feedback="", keys=None):
+    areas, jobs, bugs = areas_load(), jobs_load(), bug_rows()
+    a = areas[area]
+    jid = f"{role}-{area}-{a['attempt']}" + (f"r{a['review_round']}" if role != "recheck" and a["review_round"] > 1 else "")
+    while jid in jobs:
+        jid += "x"
+    d = fix_path("jobs", jid)
+    os.makedirs(d, exist_ok=True)
+    keys = keys or a["bugs"]
+    fixr = result_of(latest(area, "fix"))
+    repo = trackers().get(a["tracker"], a["tracker"])
+    if runner() == "t3" and not a.get("worktree"):
+        wt = "the worktree this thread started in (run `pwd`)"
+    else:
+        wt = a.get("worktree") or fix_path("wt", area)
+    host = cfg("RECHECK_COMMENT_HOST")
+    how = (f"Post it as the account that filed the issues: copy the body to {host} (`scp`) and run "
+           f"`ssh {host} \"gh issue comment <n> -R {repo} --body-file <file>\"`." if host else
+           f"`gh issue comment <n> -R {repo} --body-file <file>`.")
+    vals = {"PRODUCT": cfg("PRODUCT_NAME", os.path.basename(RUN)), "REPO": repo, "AREA": area, "KIND": a["kind"],
+            "ATTEMPT": str(a["attempt"]), "BRANCH": a["branch"], "BASE": cfg("FIX_BASE", "main"), "WORKTREE": wt,
+            "BUGS": bug_lines(a, bugs, keys, fixr.get("retest") if role == "recheck" else None),
+            "FEEDBACK": feedback, "RUN": RUN, "JOB": jid, "TRACKER": a["tracker"], "RESULT": os.path.join(d, "result.json"),
+            "EVIDENCE_DIR": os.path.join(d, "evidence"), "PR": a.get("pr") or "(not open yet)",
+            "STACK_NOTE": stack_note(area, a, jid), "COMMENT_HOW": how,
+            "CHECK_CMD": cfg(f"CHECK_CMD_{a['tracker']}", cfg("CHECK_CMD", "the repo's own type check, lint and tests")),
+            "COAUTHOR": cfg("COAUTHOR", "Claude Opus 5.5 <noreply@anthropic.com>"),
+            "SCOPE_RULE": {"fe": "Frontend only: never change or open PRs on another repo.",
+                           "be": "Backend only: never change or open PRs on another repo.",
+                           "both": "Change only this repo."}[a["kind"]]}
+    os.makedirs(vals["EVIDENCE_DIR"], exist_ok=True)
+    text = read(os.path.join(RUN, "templates", f"{role}-brief.md"))
+    for k, v in vals.items():
+        text = text.replace("{{" + k + "}}", v)
+    with open(os.path.join(d, "prompt.md"), "w") as f:
+        f.write(text)
+    model = cfg({"fix": "FIX_MODEL", "review": "REVIEW_MODEL", "recheck": "RECHECK_MODEL"}[role], "auto")
+    jobs[jid] = {"id": jid, "role": role, "area": area, "attempt": a["attempt"], "round": a["review_round"],
+                 "status": "queued", "runner": runner(), "model": model, "thread": "", "tries": 0, "keys": keys,
+                 "prompt": os.path.join(d, "prompt.md"), "result": os.path.join(d, "result.json"),
+                 "repo": repo, "repo_path": repos().get(a["tracker"], ""), "branch": a["branch"],
+                 "base": cfg("FIX_BASE", "main"), "worktree": a.get("worktree", ""), "persona": "",
+                 "created": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    jobs_save(jobs)
+    a["status"] = {"fix": "fixing", "review": "reviewing", "recheck": "rechecking"}[role]
+    areas_save(areas)
+    log(f"fix: queued {jid}")
+    return jid
+
+
+def ensure_worktree(area):
+    """cli and subagent runners: crowd.py makes the area's worktree from the local clone in REPOS. (t3 makes its own.)"""
+    areas = areas_load()
+    a = areas[area]
+    if a.get("worktree") and os.path.isdir(a["worktree"]):
+        return a["worktree"]
+    src = repos().get(a["tracker"])
+    if not src:
+        raise RuntimeError(f"no local clone for tracker {a['tracker']} in REPOS")
+    wt, base = fix_path("wt", area), cfg("FIX_BASE", "main")
+    os.makedirs(fix_path("wt"), exist_ok=True)
+    sh(["git", "-C", src, "fetch", "-q", "origin", base])
+    if not os.path.isdir(wt):
+        r = sh(["git", "-C", src, "worktree", "add", "-q", "-B", a["branch"], wt, f"origin/{base}"])
+        if r.returncode:
+            r = sh(["git", "-C", src, "worktree", "add", "-q", "-B", a["branch"], wt, base])
+        if r.returncode:
+            raise RuntimeError(f"worktree for {area}: {r.stderr.strip()[:200]}")
+    a["worktree"] = wt
+    areas_save(areas)
+    return wt
+
+
+BOUT_RUBRIC = ("correctness against the issue and the code 40, evidence (file:line, a test, a screenshot) 30, "
+               "scope (does it stay on the bug) 15, clarity 15")
+
+
+def bout(kind, a_name, b_name, subject, attack, defense, context="", rounds=None):
+    """Arena-style: the attacker's claim, the defender's answer, more rounds between two fresh fighters, then a judge
+    who checks the claims and scores both on a rubric. Returns the bout (winner "a" or "b"), saved to state/bouts/."""
+    os.makedirs(os.path.join(RUN, "state", "bouts", "work"), exist_ok=True)   # bouts/<id>.json is the bout, work/ the steps
+    day = time.strftime("%Y-%m-%d")
+    today = [b for b in (jload(p, {}) for p in glob.glob(os.path.join(RUN, "state", "bouts", "*.json"))) if b.get("day") == day]
+    if len(today) >= cfg_int("BOUT_MAX", 10):
+        return None
+    bid = f"{kind}-{hashlib.sha1((subject + attack).encode()).hexdigest()[:8]}"
+    path = os.path.join(RUN, "state", "bouts", f"{bid}.json")
+    old = jload(path)
+    if old and old.get("status") == "done":
+        return old
+    b = {"id": bid, "kind": kind, "a": a_name, "b": b_name, "subject": subject, "day": day, "status": "fighting",
+         "rounds": [{"by": "a", "text": attack, "severity": "", "reply": defense}], "winner": "", "scores": {}}
+    jsave(path, b)
+    fighter = cfg("BOUT_FIGHTER_MODEL", "sonnet")
+    for n in range(2, (rounds or cfg_int("BOUT_ROUNDS", 2)) + 1):
+        hist = "\n".join(f"Round {i + 1}. {a_name}: {r['text']}\n{b_name}: {r['reply']}" for i, r in enumerate(b["rounds"]))
+        att = llm(f"bout:{bid}:a{n}", f"""You argue for {a_name} in a dispute about: {subject}. {context}
+So far:\n{hist}\nWrite your next point: attack the weakest part of {b_name}'s last answer with evidence you can check
+(open files, run commands). Answer {{"text": "<at most 120 words>"}}.""", fighter, "low",
+                  os.path.join(RUN, "state", "bouts", "work", f"{bid}-a{n}.json"), ("text",))
+        if not att:
+            break
+        dfn = llm(f"bout:{bid}:b{n}", f"""You argue for {b_name} in a dispute about: {subject}. {context}
+So far:\n{hist}\nRound {n}. {a_name}: {att['text']}\nAnswer it with evidence you can check, or concede the parts that are
+right. Answer {{"text": "<at most 120 words>"}}.""", fighter, "low",
+                  os.path.join(RUN, "state", "bouts", "work", f"{bid}-b{n}.json"), ("text",))
+        b["rounds"].append({"by": "a", "text": att["text"], "severity": "", "reply": (dfn or {}).get("text", "")})
+        jsave(path, b)
+    hist = "\n".join(f"Round {i + 1}. {a_name}: {r['text']}\n{b_name}: {r['reply']}" for i, r in enumerate(b["rounds"]))
+    j = llm(f"bout:{bid}:judge", f"""You judge a dispute about: {subject}. {context}
+{hist}
+Check every claim yourself (open the files, the screenshots, run what is cheap). Score both sides on this rubric:
+{BOUT_RUBRIC}. A claim shown false scores zero for correctness. Answer {{"winner": "a|b", "scores": {{"a": <0-100>,
+"b": <0-100>}}, "reason": "<two sentences>"}}.""", cfg("BOUT_JUDGE_MODEL", "opus"), "medium",
+              os.path.join(RUN, "state", "bouts", "work", f"{bid}-judge.json"), ("winner", "scores"))
+    b["winner"] = (j or {}).get("winner") if (j or {}).get("winner") in ("a", "b") else "a"
+    b["scores"], b["reason"], b["status"] = (j or {}).get("scores", {}), (j or {}).get("reason", "no judge answer"), "done"
+    jsave(path, b)
+    log(f"bout {bid}: {a_name if b['winner'] == 'a' else b_name} wins ({b['reason'][:120]})")
+    return b
+
+
+def advance(jid):
+    """What comes after a finished job: fix -> review -> (fix again | recheck) -> (fix again | done)."""
+    jobs, areas = jobs_load(), areas_load()
+    j = jobs[jid]
+    area, a = j["area"], areas[j["area"]]
+    res = result_of(j)
+    if j["role"] == "fix":
+        if res.get("pr"):
+            a["pr"] = res["pr"]
+        if res.get("worktree") and os.path.isdir(res["worktree"]):
+            a["worktree"] = res["worktree"]
+        disputed, kept = [], []
+        prev = result_of(latest(area, "review"))
+        for rb in res.get("rebuttals", []):
+            try:
+                c = prev.get("comments", [])[int(rb.get("comment"))]
+            except (ValueError, TypeError, IndexError):
+                continue
+            if c.get("severity") not in ("blocker", "major"):
+                continue
+            bt = bout("review", "reviewer", "fixer", f"{area}: review comment on {c.get('file')}:{c.get('line')}",
+                      c.get("text", ""), rb.get("text", ""), f"Branch {a['branch']} in {a.get('worktree')}, base "
+                      f"{cfg('FIX_BASE', 'main')}. The fixer says the review comment is wrong.")
+            (disputed if bt and bt["winner"] == "b" else kept).append(c)
+        a["unresolved"] = [c for c in a.get("unresolved", []) if c not in disputed]
+        areas_save(areas)
+        new_job("review", area, feedback=(
+            "\n## Earlier review\nThe last review asked for these changes; check they were made:\n" +
+            "\n".join(f"- [{c.get('severity')}] {c.get('file')}:{c.get('line')} {c.get('text')}" for c in prev.get("comments", [])
+                      if c.get("severity") in ("blocker", "major") and c not in disputed) +
+            ("\nThese were overruled by a judge and must not be raised again:\n" +
+             "\n".join(f"- {c.get('file')}:{c.get('line')} {c.get('text')}" for c in disputed) if disputed else ""))
+            if prev else "")
+    elif j["role"] == "review":
+        hard = [c for c in res.get("comments", []) if c.get("severity") in ("blocker", "major")]
+        if res.get("verdict") == "changes" and hard and a["review_round"] < cfg_int("REVIEW_ROUNDS", 2):
+            a["review_round"] += 1
+            areas_save(areas)
+            new_job("fix", area, feedback="\n## Review comments to address\nA reviewer read your diff (comment index: text). Fix "
+                    "these, or answer one under `rebuttals` if you are sure it is wrong:\n" +
+                    "\n".join(f"- {i}: [{c.get('severity')}] {c.get('file')}:{c.get('line')} {c.get('text')}"
+                              for i, c in enumerate(res.get("comments", []))))
+        else:
+            if res.get("verdict") == "changes" and hard:
+                a["unresolved"] = hard
+                areas_save(areas)
+            todo = [k for k in a["bugs"] if a["verdicts"].get(k) not in ("PASS",)]
+            fixed = set(result_of(latest(area, "fix")).get("fixed", [])) | {k for k, v in a["verdicts"].items() if v != "PASS"}
+            keys = [k for k in todo if k in fixed] or todo
+            new_job("recheck", area, keys=keys)
+    elif j["role"] == "recheck":
+        for r in res.get("results", []):
+            if r.get("key") in a["bugs"]:
+                a["verdicts"][r["key"]] = r.get("verdict", "FAIL")
+                a.setdefault("recheck", {})[r["key"]] = r
+        again = [r for r in res.get("results", []) if r.get("verdict") != "PASS" and r.get("frontend_fixable", True)
+                 and r.get("key") in a["bugs"]]
+        if again and a["attempt"] <= cfg_int("FIX_RETRIES", 2):
+            a["attempt"] += 1
+            a["review_round"] = 1
+            areas_save(areas)
+            new_job("fix", area, keys=[r["key"] for r in again], feedback=(
+                "\n## Re-check results to address\nThe reporters re-tested your branch. These did not pass:\n" +
+                "\n".join(f"- `{r['key']}` #{r.get('issue')} {r.get('persona')}: {r.get('verdict')}: {r.get('note')} "
+                          f"(screenshot {r.get('shot')})" for r in again)))
+        else:
+            a["status"] = "needs-human" if again or a.get("unresolved") else "done"
+            areas_save(areas)
+            log(f"fix: {area} {a['status']}: " + ", ".join(f"{k}={v}" for k, v in a["verdicts"].items()))
+            finalize(area)
+
+
+def job_done(jid):
+    with jobs_lock():
+        jobs = jobs_load()
+        j = jobs[jid]
+        res = jload(j["result"])
+        missing = [k for k in ROLE_KEYS[j["role"]] if not isinstance(res, dict) or k not in res]
+        if missing:
+            return job_fail(jid, f"result {j['result']} missing {missing or 'entirely'}")
+        j["status"], j["finished"] = "done", time.strftime("%Y-%m-%dT%H:%M:%S")
+        jobs_save(jobs)
+        log(f"fix: {jid} done")
+        advance(jid)
+        return True
+
+
+def job_fail(jid, why):
+    with jobs_lock():
+        jobs, areas = jobs_load(), areas_load()
+        j = jobs[jid]
+        j["tries"] += 1
+        j["why"] = why
+        if j["tries"] < cfg_int("JOB_TRIES", 2):
+            j["status"] = "queued"
+            log(f"fix: {jid} failed ({why}); queued again")
+        else:
+            j["status"] = "failed"
+            areas[j["area"]]["status"] = "needs-human"
+            areas[j["area"]].setdefault("unresolved", []).append({"severity": "blocker", "text": f"{jid} failed: {why}"})
+            areas_save(areas)
+            log(f"fix: {jid} failed twice ({why}); {j['area']} needs a person")
+            jobs_save(jobs)
+            finalize(j["area"])
+            return False
+        jobs_save(jobs)
+        return False
+
+
+def ready_jobs(limit=None):
+    """Queued jobs that may start now: under FIX_PARALLEL running, and a stale claim (10 min) counts as queued."""
+    with jobs_lock():
+        jobs = jobs_load()
+        now = time.time()
+        for j in jobs.values():
+            if j["status"] == "claimed" and now - j.get("claimed_at", 0) > 600:
+                j["status"] = "queued"
+        busy = sum(1 for j in jobs.values() if j["status"] in ("running", "claimed"))
+        room = max(0, cfg_int("FIX_PARALLEL", 4) - busy)
+        if limit is not None:
+            room = min(room, limit)
+        out = [j for j in sorted(jobs.values(), key=lambda j: j["created"]) if j["status"] == "queued"][:room]
+        for j in out:
+            j["status"], j["claimed_at"] = "claimed", now
+        jobs_save(jobs)
+        return out
+
+
+def run_cli_job(j):
+    """The cli runner: one fresh claude or codex process per job, in the area's worktree."""
+    try:
+        with jobs_lock():
+            cwd = ensure_worktree(j["area"])
+            jobs = jobs_load()
+            jobs[j["id"]].update(status="running", worktree=cwd, started=time.strftime("%Y-%m-%dT%H:%M:%S"), runner="cli")
+            jobs_save(jobs)
+    except RuntimeError as e:
+        return job_fail(j["id"], str(e))
+    model = j["model"] if j["model"] != "auto" else {"fix": "opus", "review": "", "recheck": "sonnet"}[j["role"]]
+    engine = cfg("REVIEW_ENGINE", "codex" if shutil.which("codex") else "claude") if j["role"] == "review" else "claude"
+    if ":" in model:
+        engine, model = model.split(":", 1)
+    prompt = read(j["prompt"])
+    if engine == "codex":
+        cmd = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "-C", cwd,
+               *(["-m", model] if model else [])]
+    else:
+        cmd = ["claude", "-p", "--dangerously-skip-permissions", "--output-format", "json",
+               *(["--model", model or ("sonnet" if j["role"] == "review" else "opus")])]
+    with jobs_lock():
+        jobs = jobs_load()
+        jobs[j["id"]]["model"] = f"{engine}:{model}"
+        jobs_save(jobs)
+    with open(os.path.join(RUN, "logs", f"job-{j['id']}.log"), "w") as lf:
+        try:
+            subprocess.run(cmd, input=prompt, text=True, stdout=lf, stderr=subprocess.STDOUT, cwd=cwd,
+                           timeout=cfg_int("FIX_TIMEOUT_S", 7200))
+        except subprocess.TimeoutExpired:
+            return job_fail(j["id"], "timed out")
+    return job_done(j["id"])
+
+
+def fix():
+    if cfg("FIXING", "off") != "on":
+        log("fix: FIXING is not on, skipped")
+        return
+    if trackers() and not cfg("FILE_CMD") and not plan_approved():
+        log("fix: the file plan is not approved yet, so nothing is filed to fix")
+        return
+    areas = group()
+    jobs = jobs_load()
+    for name, a in areas.items():
+        if a["status"] == "queued" and not any(j["area"] == name for j in jobs.values()):
+            new_job("fix", name)
+    if runner() != "cli":
+        n = sum(1 for j in jobs_load().values() if j["status"] == "queued")
+        log(f"fix: {n} jobs ready for the {runner()} runner; the orchestrating session launches them "
+            f"(crowd.py {RUN} jobs next)")
+        return
+    with cf.ThreadPoolExecutor(cfg_int("FIX_PARALLEL", 4)) as ex:
+        live = set()
+        while True:
+            live = {f for f in live if not f.done()}
+            for j in ready_jobs(cfg_int("FIX_PARALLEL", 4) - len(live)):
+                live.add(ex.submit(run_cli_job, j))
+            if not live and all(a["status"] in TERMINAL for a in areas_load().values()):
+                break
+            if not live and not any(j["status"] in ("queued", "claimed", "running") for j in jobs_load().values()):
+                break
+            time.sleep(POLL)
+    log("fix: every area is done or needs a person")
+
+
+def finalize(area):
+    """The PR body, written from the results: per bug the issue, reporter, cause, change, before / after / re-check
+    images, the re-check verdict; then checks, review and bouts in collapsed blocks."""
+    areas, bugs = areas_load(), bug_rows()
+    a = areas[area]
+    fixes = sorted((j for j in jobs_load().values() if j["area"] == area and j["role"] == "fix" and j["status"] == "done"),
+                   key=lambda j: (j["attempt"], j["round"]))
+    merged = {"changes": {}, "cause": {}, "evidence": {}, "needs_backend": [], "not_changed": []}
+    for j in fixes:
+        r = result_of(j)
+        for k in ("changes", "cause", "evidence"):
+            merged[k].update(r.get(k, {}))
+        merged["needs_backend"] = r.get("needs_backend", merged["needs_backend"])
+        merged["not_changed"] = r.get("not_changed", merged["not_changed"])
+        if r.get("pr"):
+            a["pr"] = r["pr"]
+    last = result_of(fixes[-1]) if fixes else {}
+    rc = a.get("recheck", {})
+    lines = [f"Fixes from the {cfg('RUN_LABEL', 'crowd-qa')} crowd run, area **{area}**. Each bug was re-tested on this "
+             f"branch by the simulated user who reported it.", "",
+             "| issue | reporter | re-check | note |", "|---|---|---|---|"]
+    for k in a["bugs"]:
+        b, r = bugs.get(k, {}), rc.get(k, {})
+        lines.append(f"| #{b.get('issue')} | {b.get('reporter')} | {r.get('verdict', 'not re-checked')} | "
+                     f"{(r.get('note') or '').replace('|', '/')} |")
+    for k in a["bugs"]:
+        b, r, ev = bugs.get(k, {}), rc.get(k, {}), merged["evidence"].get(k, {})
+        lines += ["", f"### Fixes #{b.get('issue')}: {b.get('title')}", "",
+                  f"Reported by **{b.get('reporter')}**" + (f", also hit by {', '.join(b['confirmers'])}" if b.get("confirmers") else "") + ".", ""]
+        if merged["cause"].get(k):
+            lines.append(f"**Cause:** {merged['cause'][k]}")
+        if merged["changes"].get(k):
+            lines.append(f"**Change:** {merged['changes'][k]}")
+        imgs = [(t, u) for t, u in (("Before", ev.get("before")), ("After", ev.get("after")), ("Re-check", r.get("shot"))) if u]
+        if imgs:
+            lines += ["", "| " + " | ".join(t for t, _ in imgs) + " |", "|" + "---|" * len(imgs),
+                      "| " + " | ".join(f"<img src=\"{u}\" width=\"260\">" for _, u in imgs) + " |"]
+        if r:
+            lines.append(f"\n**Re-check by {r.get('persona')}: {r.get('verdict')}.** {r.get('note', '')}"
+                         + (f" ([comment]({r['comment']}))" if r.get("comment") else ""))
+    if merged["needs_backend"]:
+        lines += ["", "### Needs backend", ""] + [f"- `{n.get('key')}` #{bugs.get(n.get('key'), {}).get('issue')}: {n.get('why')}"
+                                                   for n in merged["needs_backend"]]
+    if merged["not_changed"]:
+        lines += ["", "### Not changed", ""] + [f"- `{n.get('key')}` #{bugs.get(n.get('key'), {}).get('issue')}: {n.get('why')}"
+                                                 for n in merged["not_changed"]]
+    if a.get("unresolved"):
+        lines += ["", "### Open points for a person", ""] + [f"- [{c.get('severity')}] {c.get('file', '')}:{c.get('line', '')} "
+                                                              f"{c.get('text')}" for c in a["unresolved"]]
+    ch = last.get("checks", {})
+    if ch:
+        lines += ["", f"<details><summary>Checks: <code>{ch.get('cmd', '')}</code> {'passed' if ch.get('ok') else 'FAILED'}"
+                  "</summary>", "", "```", str(ch.get("tail", ""))[-3000:], "```", "</details>"]
+    revs = sorted((j for j in jobs_load().values() if j["area"] == area and j["role"] == "review" and j["status"] == "done"),
+                  key=lambda j: (j["attempt"], j["round"]))
+    if revs:
+        lines += ["", "<details><summary>Review</summary>", ""]
+        for j in revs:
+            r = result_of(j)
+            lines.append(f"**Attempt {j['attempt']}, round {j['round']}, {j.get('model', '')}: {r.get('verdict')}.** {r.get('summary', '')}")
+            lines += [f"- [{c.get('severity')}] `{c.get('file')}:{c.get('line')}` {c.get('text')}" for c in r.get("comments", [])]
+            lines.append("")
+        lines.append("</details>")
+    bouts = [b for b in (jload(p, {}) for p in sorted(glob.glob(os.path.join(RUN, "state", "bouts", "review-*.json"))))
+             if b.get("subject", "").startswith(f"{area}:")]
+    if bouts:
+        lines += ["", "<details><summary>Disputes settled by a judge</summary>", ""]
+        for b in bouts:
+            lines.append(f"**{b['subject']}**: {b['a'] if b['winner'] == 'a' else b['b']} won "
+                         f"({b.get('scores', {}).get('a')} to {b.get('scores', {}).get('b')}). {b.get('reason', '')}")
+            lines += [f"> {b['a']}: {r['text']}\n>\n> {b['b']}: {r['reply']}\n" for r in b["rounds"]]
+        lines.append("</details>")
+    lines += ["", "🤖 Generated with [Claude Code](https://claude.com/claude-code)"]
+    body = "\n".join(lines) + "\n"
+    bf = fix_path("jobs", f"pr-{area}.md")
+    os.makedirs(os.path.dirname(bf), exist_ok=True)
+    with open(bf, "w") as f:
+        f.write(body)
+    prs = jload(os.path.join(RUN, "state", "prs.json"), {})
+    counts = {v: sum(1 for k in a["bugs"] if a["verdicts"].get(k) == v.upper()) for v in ("pass", "partial", "fail")}
+    if a.get("pr"):
+        repo = trackers().get(a["tracker"], a["tracker"])
+        r = sh(["gh", "pr", "edit", a["pr"], "-R", repo, "--body-file", bf])
+        if r.returncode:
+            log(f"fix: could not update {a['pr']}: {r.stderr.strip()[:200]}")
+        if a["status"] == "needs-human":
+            sh(["gh", "label", "create", "--force", "-R", repo, "needs-human"])
+            sh(["gh", "pr", "edit", a["pr"], "-R", repo, "--add-label", "needs-human"])
+    num = re.search(r"/pull/(\d+)", a.get("pr", ""))
+    prs[area] = {"url": a.get("pr", ""), "number": int(num.group(1)) if num else None, "status": a["status"],
+                 "bugs": a["bugs"], "recheck": counts}
+    jsave(os.path.join(RUN, "state", "prs.json"), prs)
+    areas_save(areas)
+
+
+def jobs_cli(args):
+    """crowd.py <run> jobs next [--max N] | start <id> [--runner R] [--model M] [--thread T] [--worktree P]
+       | done <id> | fail <id> <why> | requeue-running | list"""
+    sub = args[0] if args else "list"
+    opt = {args[i][2:]: args[i + 1] for i in range(1, len(args) - 1) if args[i].startswith("--")}
+    if sub == "next":
+        out = []
+        for j in ready_jobs(int(opt["max"]) if "max" in opt else None):
+            if runner() == "subagent" and repos().get(areas_load()[j["area"]]["tracker"]):
+                with jobs_lock():
+                    ensure_worktree(j["area"])          # a subagent gets a ready checkout; t3 makes its own
+            a = areas_load()[j["area"]]
+            out.append({**j, "prompt_text": read(j["prompt"]), "kind": a["kind"], "worktree": a.get("worktree", ""),
+                        "launch": "new-worktree" if j["role"] == "fix" and not a.get("worktree") else "existing-worktree"})
+        print(json.dumps(out, indent=1))
+    elif sub == "start":
+        with jobs_lock():
+            jobs = jobs_load()
+            j = jobs[args[1]]
+            j.update(status="running", started=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                     **{k: v for k, v in opt.items() if k in ("runner", "model", "thread", "persona")})
+            if opt.get("worktree"):
+                j["worktree"] = opt["worktree"]
+                areas = areas_load()
+                areas[j["area"]]["worktree"] = opt["worktree"]
+                areas_save(areas)
+            jobs_save(jobs)
+        print(f"{args[1]} running")
+    elif sub == "done":
+        ok = job_done(args[1])
+        print(json.dumps({"ok": ok, "ready": sum(1 for j in jobs_load().values() if j["status"] == "queued"),
+                          "areas": {k: v["status"] for k, v in areas_load().items()}}))
+    elif sub == "fail":
+        job_fail(args[1], " ".join(args[2:]) or "failed")
+        print(f"{args[1]}: {jobs_load()[args[1]]['status']}")
+    elif sub == "requeue-running":
+        with jobs_lock():
+            jobs = jobs_load()
+            n = 0
+            for j in jobs.values():
+                if j["status"] in ("running", "claimed") and not jload(j["result"]):
+                    j["status"], n = "queued", n + 1
+            jobs_save(jobs)
+        print(f"{n} jobs queued again")
+    else:
+        for j in sorted(jobs_load().values(), key=lambda j: j["created"]):
+            print(f"{j['id']:34} {j['status']:9} {j['runner']:8} {j['model']:28} {j.get('thread', '')}")
+        for k, a in areas_load().items():
+            print(f"area {k:20} {a['status']:12} attempt {a['attempt']} pr {a.get('pr') or '-'}")
 
 
 # --------------------------------------------------------------------------------------------------- status
@@ -1143,6 +1788,13 @@ def status():
         if os.path.exists(os.path.join(RUN, k)):
             print(f"{k}: {read(os.path.join(RUN, k)).strip()}")
     subprocess.run(["python3", os.path.join(SCRIPTS, "status.py"), RUN])
+    if areas_load():
+        print("fix areas: " + ", ".join(f"{k}={a['status']}" + (f" {a['pr']}" if a.get("pr") else "")
+                                        for k, a in areas_load().items()))
+        js = {}
+        for j in jobs_load().values():
+            js[j["status"]] = js.get(j["status"], 0) + 1
+        print(f"fix jobs: {js}")
 
 
 def main():
@@ -1167,7 +1819,13 @@ def main():
     os.makedirs(os.path.dirname(pid_f), exist_ok=True)
     with open(pid_f, "w") as f:
         f.write(str(os.getpid()))
-    steps = {"plan": plan, "run": run, "dedupe": dedupe, "file": file_issues, "report": report}
+    if CMD == "jobs":
+        return jobs_cli(sys.argv[3:])
+    if CMD == "pr":
+        for area in areas_load():
+            finalize(area)
+        return
+    steps = {"plan": plan, "run": run, "dedupe": dedupe, "file": file_issues, "fix": fix, "report": report}
     for name in (list(steps) if CMD == "all" else [CMD]):
         if name not in steps:
             sys.exit(__doc__)
