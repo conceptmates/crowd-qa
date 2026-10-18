@@ -54,7 +54,14 @@ case "$CMD" in
     J="$3"; BR="$4"
     [ -n "${BE_DEPLOY_CMD:-}" ] || { echo "BE_DEPLOY_CMD is not set in config.env; backend fixes cannot be re-tested" >&2; exit 1; }
     until mkdir "$D/be.lock" 2>/dev/null; do
-      [ "$(cat "$D/be.lock/job" 2>/dev/null)" = "$J" ] && break
+      H=$(cat "$D/be.lock/job" 2>/dev/null)
+      [ "$H" = "$J" ] && break
+      # a holder that is no longer running (done, failed, re-queued) left the lock behind: take it over
+      ST=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], {}).get('status', ''))" \
+            "$RUN/state/jobs.json" "$H" 2>/dev/null)
+      if [ -n "$H" ] && [ "$ST" != running ] && [ "$ST" != claimed ]; then
+        echo "backend lock of $H ($ST) taken over by $J" >&2; rm -rf "$D/be.lock"; continue
+      fi
       sleep 15
     done
     echo "$J" > "$D/be.lock/job"

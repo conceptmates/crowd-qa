@@ -9,6 +9,7 @@ case "$RUN" in /tmp/*|/private/tmp/*) echo "refusing /tmp: a reboot wipes it; us
 SKILL="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$RUN"/{lanes,scripts,templates,references,square,world,state,logs,archive,.runner,.devices,.active}
 cp "$SKILL"/scripts/*.sh "$SKILL"/scripts/*.py "$RUN/scripts/"
+mkdir -p "$RUN/scripts/world"; cp "$SKILL"/scripts/world/* "$RUN/scripts/world/"   # the 3D page square-view.py writes
 cp "$SKILL"/templates/* "$RUN/templates/"
 mkdir -p "$RUN/references"; cp "$SKILL"/references/*.md "$RUN/references/"
 chmod +x "$RUN"/scripts/*.sh

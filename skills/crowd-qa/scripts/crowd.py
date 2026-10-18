@@ -549,7 +549,8 @@ def run():
     finished = ("judged", "skipped", "failed")
     last_down_note = 0
     while not all(v in finished for v in st.values()):
-        cap = cfg_int("HARD_CAP", 4)  # re-read: capacity changes in config.env apply without a restart
+        C.update(load_config())       # capacity changes in config.env apply without a restart
+        cap = cfg_int("HARD_CAP", 4)
         # finished runners: DONE written, or the process died without one
         for k in [k for k, v in st.items() if v == "running"]:
             dl = done_line(*k)
@@ -698,13 +699,13 @@ def dedupe():
 
 
 # --------------------------------------------------------------------------------------------------- 4. filing
+def kv(key):
+    """'a=x b=y' settings (TRACKERS, REPOS, TRACKER_KIND) as a dict."""
+    return dict(i.split("=", 1) for i in cfg(key).split() if "=" in i)
+
+
 def trackers():
-    out = {}
-    for item in cfg("TRACKERS").split():
-        if "=" in item:
-            k, v = item.split("=", 1)
-            out[k] = v
-    return out
+    return kv("TRACKERS")
 
 
 def sh(cmd, cwd=None, check=False):
@@ -818,8 +819,8 @@ def snapshot(key, repo):
             "number,title,body,state,stateReason,labels,closedAt,url,comments"])
     items = jload_str(r.stdout)
     if r.returncode or not isinstance(items, list):
-        log(f"file: could not read the issues of {repo} ({r.stderr.strip()[:200]}); planning against an empty list")
-        items = []
+        log(f"file: could not read the issues of {repo} ({r.stderr.strip()[:200]}); not planning against an empty list")
+        return None
     snap = [{"number": i["number"], "title": i.get("title", ""), "state": i.get("state", ""),
              "reason": i.get("stateReason") or "", "closed": i.get("closedAt") or "", "url": i.get("url", ""),
              "labels": [lab.get("name") for lab in i.get("labels", [])], "body": (i.get("body") or "")[:4000],
@@ -852,6 +853,8 @@ def make_plan(key, repo, bugs):
     closed one, or skip. Written to state/file-plan.json and file-plan.md for a person to approve."""
     snap = snapshot(key, repo)
     plan = jload(os.path.join(RUN, "state", "file-plan.json"), {})
+    if snap is None:
+        return plan
     todo = [x for x in bugs if x["key"] not in plan]
     size = cfg_int("PLAN_BATCH", 30)
     for start in range(0, len(todo), size):
@@ -899,6 +902,7 @@ Answer {{"plan": [{{"key": "<bug key>", "action": "create|comment|regression|ski
                        "reason": a.get("reason", ""), "quote": a.get("quote", ""),
                        "title": next(x["title"] for x in batch if x["key"] == k), "tracker": key}
         jsave(os.path.join(RUN, "state", "file-plan.json"), plan)
+    jsave(os.path.join(RUN, "state", "file-plan.json"), plan)   # also when no bug needed the model
     return plan
 
 
@@ -939,8 +943,21 @@ def comment_body(x, urls, target):
     return "\n".join(lines) + "\n"
 
 
+def approved_keys():
+    """The plan lines a person approved: every key in the plan when `approve` ran. Bugs planned later wait for the
+    next approval. FILE_AUTO=yes approves everything."""
+    if cfg("FILE_AUTO", "no") == "yes":
+        return None
+    a = read(os.path.join(RUN, "state", "FILE_PLAN_APPROVED"))
+    try:
+        return set(json.loads(a).get("keys", []))
+    except (ValueError, AttributeError):
+        return set(jload(os.path.join(RUN, "state", "file-plan.json"), {})) if a.strip() else set()
+
+
 def plan_approved():
-    return cfg("FILE_AUTO", "no") == "yes" or os.path.exists(os.path.join(RUN, "state", "FILE_PLAN_APPROVED"))
+    keys = approved_keys()
+    return keys is None or bool(keys)
 
 
 def file_issues():
@@ -963,13 +980,22 @@ def file_issues():
             if mine:
                 plan = make_plan(key, tr.get(key, key), mine)
         write_plan_md(plan, tr)
-        if not plan_approved():
-            n = {a: sum(1 for k, p in plan.items() if p["action"] == a and k in {x["key"] for x in todo}) for a in PLAN_ACTIONS}
-            log(f"file: plan written to {RUN}/file-plan.md ({n}); nothing sent. Approve with: crowd.py {RUN} approve")
+        ok = approved_keys()
+        waiting = [x for x in todo if x["key"] in plan and ok is not None and x["key"] not in ok]
+        unplanned = [x for x in todo if x["key"] not in plan]
+        for x in unplanned:
+            log(f"file: not in the plan yet, so not filed: {x['title']} (the next run plans it)")
+        todo = [x for x in todo if x["key"] in plan and (ok is None or x["key"] in ok)]
+        if waiting:
+            n = {a: sum(1 for x in waiting if plan[x["key"]]["action"] == a) for a in PLAN_ACTIONS}
+            log(f"file: plan written to {RUN}/file-plan.md; {len(waiting)} lines wait for approval ({n}). "
+                f"Approve with: crowd.py {RUN} approve")
             notify = cfg("NOTIFY_CMD")
             if notify:
                 sh(["bash", "-c", f'{notify} "$1"', "_", f"crowd-qa file plan ready for approval: {RUN}/file-plan.md"])
-            return
+            if not todo:
+                log("file: nothing sent")
+                return
     for key in keys:
         mine = [x for x in todo if x["tracker"] == key]
         if not mine:
@@ -1023,6 +1049,13 @@ def file_issues():
                         *sum((["--add-label", lab] for lab in x["labels"] if lab.startswith("persona:")), [])])
                     return x, url, ""
                 return x, None, f"error: comment returned no URL: {r.stderr.strip()[:200]}"
+            if not hook:   # an earlier try may have created it before failing: never file the same title twice
+                r = sh(["gh", "issue", "list", "-R", repo, "--state", "all", "--search", f'"{x["title"]}" in:title',
+                        "--limit", "5", "--json", "number,title,url"])
+                same = next((i for i in (jload_str(r.stdout) or []) if isinstance(i, dict) and
+                             i.get("title", "").strip().lower() == x["title"].strip().lower()), None)
+                if same:
+                    return x, same.get("url") or f"https://github.com/{repo}/issues/{same['number']}", ""
             body = render_body(x, urls.get(x["key"], []))
             labels = list(x["labels"])
             if p["action"] == "regression":
@@ -1182,12 +1215,11 @@ def runner():
 
 
 def tracker_kind(key):
-    kinds = dict(i.split("=", 1) for i in cfg("TRACKER_KIND").split() if "=" in i)
-    return kinds.get(key) or ("be" if re.search(r"back|api|server", key) else "fe")
+    return kv("TRACKER_KIND").get(key) or ("be" if re.search(r"back|api|server", key) else "fe")
 
 
 def repos():
-    return dict(i.split("=", 1) for i in cfg("REPOS").split() if "=" in i)
+    return kv("REPOS")
 
 
 def slug(s):
@@ -1365,15 +1397,20 @@ BOUT_RUBRIC = ("correctness against the issue and the code 40, evidence (file:li
                "scope (does it stay on the bug) 15, clarity 15")
 
 
+def bout_id(kind, subject, attack):
+    return f"{kind}-{hashlib.sha1((subject + attack).encode()).hexdigest()[:8]}"
+
+
 def bout(kind, a_name, b_name, subject, attack, defense, context="", rounds=None):
     """Arena-style: the attacker's claim, the defender's answer, more rounds between two fresh fighters, then a judge
     who checks the claims and scores both on a rubric. Returns the bout (winner "a" or "b"), saved to state/bouts/."""
     os.makedirs(os.path.join(RUN, "state", "bouts", "work"), exist_ok=True)   # bouts/<id>.json is the bout, work/ the steps
     day = time.strftime("%Y-%m-%d")
-    today = [b for b in (jload(p, {}) for p in glob.glob(os.path.join(RUN, "state", "bouts", "*.json"))) if b.get("day") == day]
+    today = [b for b in (jload(p, {}) for p in glob.glob(os.path.join(RUN, "state", "bouts", "*.json")))
+             if b.get("day") == day and b.get("status") == "done"]
     if len(today) >= cfg_int("BOUT_MAX", 10):
         return None
-    bid = f"{kind}-{hashlib.sha1((subject + attack).encode()).hexdigest()[:8]}"
+    bid = bout_id(kind, subject, attack)
     path = os.path.join(RUN, "state", "bouts", f"{bid}.json")
     old = jload(path)
     if old and old.get("status") == "done":
@@ -1403,8 +1440,13 @@ Check every claim yourself (open the files, the screenshots, run what is cheap).
 {BOUT_RUBRIC}. A claim shown false scores zero for correctness. Answer {{"winner": "a|b", "scores": {{"a": <0-100>,
 "b": <0-100>}}, "reason": "<two sentences>"}}.""", cfg("BOUT_JUDGE_MODEL", "opus"), "medium",
               os.path.join(RUN, "state", "bouts", "work", f"{bid}-judge.json"), ("winner", "scores"))
-    b["winner"] = (j or {}).get("winner") if (j or {}).get("winner") in ("a", "b") else "a"
-    b["scores"], b["reason"], b["status"] = (j or {}).get("scores", {}), (j or {}).get("reason", "no judge answer"), "done"
+    if (j or {}).get("winner") not in ("a", "b"):
+        b["status"], b["reason"] = "no-verdict", "the judge gave no valid answer; nothing was decided"
+        jsave(path, b)
+        log(f"bout {bid}: no verdict; the next run tries again")
+        return None
+    b["winner"] = j["winner"]
+    b["scores"], b["reason"], b["status"] = j.get("scores", {}), j.get("reason", ""), "done"
     jsave(path, b)
     log(f"bout {bid}: {a_name if b['winner'] == 'a' else b_name} wins ({b['reason'][:120]})")
     return b
@@ -1430,9 +1472,7 @@ def advance(jid):
                 continue
             if c.get("severity") not in ("blocker", "major"):
                 continue
-            bt = bout("review", "reviewer", "fixer", f"{area}: review comment on {c.get('file')}:{c.get('line')}",
-                      c.get("text", ""), rb.get("text", ""), f"Branch {a['branch']} in {a.get('worktree')}, base "
-                      f"{cfg('FIX_BASE', 'main')}. The fixer says the review comment is wrong.")
+            bt = dispute_bout(area, a, c, rb, cached=True)
             (disputed if bt and bt["winner"] == "b" else kept).append(c)
         a["unresolved"] = [c for c in a.get("unresolved", []) if c not in disputed]
         areas_save(areas)
@@ -1476,16 +1516,52 @@ def advance(jid):
                 "\n".join(f"- `{r['key']}` #{r.get('issue')} {r.get('persona')}: {r.get('verdict')}: {r.get('note')} "
                           f"(screenshot {r.get('shot')})" for r in again)))
         else:
-            a["status"] = "needs-human" if again or a.get("unresolved") else "done"
+            left = [k for k in a["bugs"] if a["verdicts"].get(k) != "PASS"]
+            a["status"] = "needs-human" if left or a.get("unresolved") else "done"
             areas_save(areas)
             log(f"fix: {area} {a['status']}: " + ", ".join(f"{k}={v}" for k, v in a["verdicts"].items()))
             finalize(area)
 
 
+def settle_disputes(j):
+    """Bouts for review comments the fixer disputes, run before job_done takes the lock: a bout is several model
+    calls, and every other job would wait on the lock meanwhile. advance() then reads the finished bouts."""
+    if j["role"] != "fix":
+        return
+    res, a = jload(j["result"], {}) or {}, areas_load().get(j["area"], {})
+    prev = result_of(latest(j["area"], "review"))
+    for rb in res.get("rebuttals", []) if isinstance(res, dict) else []:
+        try:
+            c = prev.get("comments", [])[int(rb.get("comment"))]
+        except (ValueError, TypeError, IndexError):
+            continue
+        if c.get("severity") in ("blocker", "major"):
+            dispute_bout(j["area"], a, c, rb)
+
+
+def dispute_bout(area, a, c, rb, cached=False):
+    subject = f"{area}: review comment on {c.get('file')}:{c.get('line')}"
+    if cached:     # under the jobs lock: only read a bout settle_disputes already finished
+        b = jload(os.path.join(RUN, "state", "bouts", f"{bout_id('review', subject, c.get('text', ''))}.json"), {})
+        return b if b.get("status") == "done" else None
+    return bout("review", "reviewer", "fixer", f"{area}: review comment on {c.get('file')}:{c.get('line')}",
+                c.get("text", ""), rb.get("text", ""), f"Branch {a.get('branch')} in {a.get('worktree')}, base "
+                f"{cfg('FIX_BASE', 'main')}. The fixer says the review comment is wrong.")
+
+
 def job_done(jid):
+    j0 = jobs_load().get(jid, {})
+    if j0.get("status") == "done":
+        log(f"fix: {jid} was already done; nothing queued again")
+        return True
+    if j0:
+        give_backend(jid)
+        settle_disputes(j0)
     with jobs_lock():
         jobs = jobs_load()
         j = jobs[jid]
+        if j["status"] == "done":
+            return True
         res = jload(j["result"])
         missing = [k for k in ROLE_KEYS[j["role"]] if not isinstance(res, dict) or k not in res]
         if missing:
@@ -1497,7 +1573,13 @@ def job_done(jid):
         return True
 
 
+def give_backend(jid):
+    if areas_load().get(jobs_load().get(jid, {}).get("area"), {}).get("kind") in ("be", "both"):
+        sh(["bash", os.path.join(SCRIPTS, "fix-stack.sh"), RUN, "be-give", jid])
+
+
 def job_fail(jid, why):
+    give_backend(jid)
     with jobs_lock():
         jobs, areas = jobs_load(), areas_load()
         j = jobs[jid]
@@ -1552,16 +1634,20 @@ def run_cli_job(j):
     engine = cfg("REVIEW_ENGINE", "codex" if shutil.which("codex") else "claude") if j["role"] == "review" else "claude"
     if ":" in model:
         engine, model = model.split(":", 1)
+    elif re.search(r"opus|sonnet|haiku|fable|claude", model or ""):
+        engine = "claude"
+    if engine == "claude" and not model:
+        model = "sonnet" if j["role"] == "review" else "opus"
     prompt = read(j["prompt"])
     if engine == "codex":
         cmd = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "-C", cwd,
                *(["-m", model] if model else [])]
     else:
         cmd = ["claude", "-p", "--dangerously-skip-permissions", "--output-format", "json",
-               *(["--model", model or ("sonnet" if j["role"] == "review" else "opus")])]
+               "--model", model]
     with jobs_lock():
         jobs = jobs_load()
-        jobs[j["id"]]["model"] = f"{engine}:{model}"
+        jobs[j["id"]]["model"] = f"{engine}:{model or 'default'}"
         jobs_save(jobs)
     with open(os.path.join(RUN, "logs", f"job-{j['id']}.log"), "w") as lf:
         try:
@@ -1569,7 +1655,17 @@ def run_cli_job(j):
                            timeout=cfg_int("FIX_TIMEOUT_S", 7200))
         except subprocess.TimeoutExpired:
             return job_fail(j["id"], "timed out")
+        except OSError as e:          # the engine is not installed, the worktree vanished
+            return job_fail(j["id"], f"could not start {cmd[0]}: {e}")
     return job_done(j["id"])
+
+
+def run_cli_job_safe(j):
+    try:
+        return run_cli_job(j)
+    except Exception as e:            # never leave a job 'running' with nobody on it: fix() would wait forever
+        log(f"fix: {j['id']} crashed in crowd.py: {e!r}")
+        return job_fail(j["id"], f"crowd.py error: {e!r}")
 
 
 def fix():
@@ -1594,7 +1690,7 @@ def fix():
         while True:
             live = {f for f in live if not f.done()}
             for j in ready_jobs(cfg_int("FIX_PARALLEL", 4) - len(live)):
-                live.add(ex.submit(run_cli_job, j))
+                live.add(ex.submit(run_cli_job_safe, j))
             if not live and all(a["status"] in TERMINAL for a in areas_load().values()):
                 break
             if not live and not any(j["status"] in ("queued", "claimed", "running") for j in jobs_load().values()):
@@ -1736,12 +1832,17 @@ def jobs_cli(args):
     elif sub == "requeue-running":
         with jobs_lock():
             jobs = jobs_load()
-            n = 0
+            n, finished = 0, []
             for j in jobs.values():
-                if j["status"] in ("running", "claimed") and not jload(j["result"]):
-                    j["status"], n = "queued", n + 1
+                if j["status"] in ("running", "claimed"):
+                    if jload(j["result"]):
+                        finished.append(j["id"])
+                    else:
+                        j["status"], n = "queued", n + 1
             jobs_save(jobs)
-        print(f"{n} jobs queued again")
+        for jid in finished:              # the agent wrote its result but nobody reported it
+            job_done(jid)
+        print(f"{n} jobs queued again, {len(finished)} finished from their results")
     else:
         for j in sorted(jobs_load().values(), key=lambda j: j["created"]):
             print(f"{j['id']:34} {j['status']:9} {j['runner']:8} {j['model']:28} {j.get('thread', '')}")
@@ -1803,11 +1904,18 @@ def main():
         return status()
     if CMD == "approve":
         os.makedirs(os.path.join(RUN, "state"), exist_ok=True)
-        with open(os.path.join(RUN, "state", "FILE_PLAN_APPROVED"), "w") as f:
-            f.write(time.strftime("%Y-%m-%dT%H:%M:%S") + "\n")
+        jsave(os.path.join(RUN, "state", "FILE_PLAN_APPROVED"),
+              {"at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+               "keys": sorted(jload(os.path.join(RUN, "state", "file-plan.json"), {}))})
         log("file: plan approved")
         sys.argv[2:3] = ["file"]
         globals()["CMD"] = "file"
+    if CMD == "jobs":              # short calls from the orchestrating session, several at once: no pid guard
+        return jobs_cli(sys.argv[3:])
+    if CMD == "pr":
+        for area in areas_load():
+            finalize(area)
+        return
     if CMD == "makeup":
         if len(sys.argv) < 4:
             sys.exit("usage: crowd.py <run> makeup <new-run> [--scen-max N]")
@@ -1819,12 +1927,6 @@ def main():
     os.makedirs(os.path.dirname(pid_f), exist_ok=True)
     with open(pid_f, "w") as f:
         f.write(str(os.getpid()))
-    if CMD == "jobs":
-        return jobs_cli(sys.argv[3:])
-    if CMD == "pr":
-        for area in areas_load():
-            finalize(area)
-        return
     steps = {"plan": plan, "run": run, "dedupe": dedupe, "file": file_issues, "fix": fix, "report": report}
     for name in (list(steps) if CMD == "all" else [CMD]):
         if name not in steps:

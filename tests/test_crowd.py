@@ -427,6 +427,20 @@ class Filing(unittest.TestCase):
         self.assertTrue(any(v["reason"].startswith("skipped: intended (#30)") for v in refused.values()))
         self.assertEqual(len([c for c in r.calls(kind="step") if c["step"].startswith("file-plan:")]), 1, "one batch call")
 
+    def test_an_approval_covers_only_the_plan_lines_that_existed_when_it_was_given(self):
+        r = Run("approvekeys", lanes("maya"), config='DAYS=1 FILE_CMD="" TRACKERS="app=owner/app"',
+                tester={"maya": {"findings": [{"title": "Archive button deletes the whole conversation thread"}]}})
+        r.crowd("run")
+        r.crowd("file")
+        r.crowd("approve")
+        self.assertEqual(len(json.load(open(r.path("state", "filed.json")))), 1)
+        issues = json.load(open(r.path("state", "issues.json")))
+        issues.append({**issues[0], "title": "Export drops the last row of the file", "key": "later0000001"})
+        json.dump(issues, open(r.path("state", "issues.json"), "w"))
+        r.crowd("file")
+        self.assertEqual(len(json.load(open(r.path("state", "filed.json")))), 1, "a bug planned after approval waits")
+        self.assertIn("1 lines wait for approval", r.read("logs", "crowd.log"))
+
     def test_file_cmd_hook(self):
         r = Run("hook", lanes("maya"), config="DAYS=1", tester={"maya": {"findings": [{"title": "Search ignores accents"}]}})
         r.crowd("run")
@@ -519,6 +533,30 @@ class Fixing(unittest.TestCase):
         self.assertIn("sided with the can't-repro report", json.dumps(json.load(open(r.path("state", "refused.json")))))
         b = json.load(open(glob.glob(r.path("state", "bouts", "square-*.json"))[0]))
         self.assertEqual((b["a"], b["b"], b["winner"]), ("can't-repro", "Maya", "a"))
+
+    def test_a_judge_that_gives_no_verdict_decides_nothing(self):
+        r = Run("noverdict", lanes("maya"), config='DAYS=1 FILE_CMD="" TRACKERS="app=owner/app" FILE_AUTO=yes',
+                tester={"maya": {"findings": [{"title": "Export drops the last row of the file"}]}})
+        r.crowd("run")
+        r.crowd("dedupe")
+        issues = json.load(open(r.path("state", "issues.json")))
+        issues[0]["cant_repro"] = ["**Leo** could not reproduce."]
+        json.dump(issues, open(r.path("state", "issues.json"), "w"))
+        r.env["FAKE_BOUT_NO_VERDICT"] = "1"
+        r.crowd("file")
+        self.assertEqual(len(r.calls(kind="gh-body")), 1, "the bug is filed, not thrown out by a failed judge")
+        b = json.load(open(glob.glob(r.path("state", "bouts", "square-*.json"))[0]))
+        self.assertEqual((b["status"], b["winner"]), ("no-verdict", ""))
+
+    def test_reporting_a_job_twice_queues_its_follow_up_once(self):
+        r = self.fix_run("fixtwice", "RUNNER=t3")
+        r.crowd("all", timeout=300)
+        j = json.loads(r.crowd("jobs", "next").stdout)[0]
+        json.dump({"fixed": j["keys"], "branch": j["branch"]}, open(j["result"], "w"))
+        r.crowd("jobs", "done", j["id"])
+        r.crowd("jobs", "done", j["id"])
+        reviews = [k for k in json.load(open(r.path("state", "jobs.json"))) if k.startswith("review-")]
+        self.assertEqual(len(reviews), 1)
 
     def test_retries_run_out_and_the_pr_is_labelled_needs_human(self):
         r = self.fix_run("fixhuman", "RUNNER=cli FIX_RETRIES=0")

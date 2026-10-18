@@ -165,7 +165,9 @@ def model_step(prompt, resumed=False):
         json.dump({"areas": [{"name": "Inbox flows", "tracker": bugs[0]["tracker"], "bugs": [b["key"] for b in bugs],
                               "files": ["src/app.js"]}]}, open(out, "w"))
     elif step.startswith("bout:"):
-        if step.endswith(":judge"):
+        if step.endswith(":judge") and os.environ.get("FAKE_BOUT_NO_VERDICT"):
+            open(out, "w").write("{}")
+        elif step.endswith(":judge"):
             json.dump({"winner": os.environ.get("FAKE_BOUT_WINNER", "b"), "scores": {"a": 40, "b": 70},
                        "reason": "the guard is there"}, open(out, "w"))
         else:

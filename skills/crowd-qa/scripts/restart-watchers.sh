@@ -4,7 +4,7 @@
 #   memlog.sh       memory, swap and load every minute (memlog.txt)
 #   api-watch.sh    stack health every minute; writes STACK_DOWN so testers hold (only when HEALTH_CHECKS is set)
 #   state-saver.sh  state/ on disk every 5 minutes, so any new session can resume the run
-#   square-view.py  the live square page (square/index.html)
+#   square-view.py  the live pages: the 3D world (square/index.html) and the square (square/square.html)
 #   tunnel.sh       remote mode only
 #   quota-guard.sh  when CODEX_ACCOUNTS or CLAUDE_ACCOUNTS is set (account rotation through caam)
 #   DEV_CMD         when set and APP_URL does not answer

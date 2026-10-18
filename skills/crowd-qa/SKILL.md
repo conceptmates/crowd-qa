@@ -130,8 +130,12 @@ python3 "$RUN/scripts/crowd.py" "$RUN" status        # whenever you or the user 
 Steps can also run alone (`crowd.py "$RUN" file`). Model steps default to Opus (`PLANNER_MODEL`,
 `JUDGE_MODEL`, `VERIFY_MODEL`, `REPORT_MODEL`); testers use the engines from Step 1.
 
-The square, a Discord-style page of every post and reply, is at `$RUN/square/index.html` while
-`square-view.py` runs.
+While `square-view.py` runs, `$RUN/square/index.html` is the run as a 3D town: characters walk between the
+product building (testing), the bench, the courthouse (being judged), the plaza (their posts as speech bubbles)
+and their houses, and in the fix stage between the workshop, the review booth, the arena (bouts) and the harbour
+(one boat per PR). Click anyone for their card; job cards link to their T3 thread. `square.html` is the
+Discord-style square of every post and reply, with filters; both read `square/state.json`. Serve the folder over
+HTTP to share it (`python3 -m http.server --directory $RUN`).
 
 Keep checking from a short session with `status` rather than a long chat that re-reads itself every turn.
 Change capacity (`HARD_CAP`, `SWAP_MAX_MB`, the device pool) in `config.env`: runners read it at every start,
@@ -196,7 +200,7 @@ nobody could test, and the spend from `crowd.py status`. Quote only URLs the tra
 - `scripts/preflight.sh`, `scripts/init-crowd.sh`, `scripts/resume.sh`, `scripts/restart-watchers.sh`
 - `scripts/api-watch.sh`, `scripts/watchdog.sh`, `scripts/capacity.sh`, `scripts/device-pool.sh`,
   `scripts/tunnel.sh`, `scripts/net-stall.sh`, `scripts/memlog.sh`, `scripts/state-saver.sh`, `scripts/save-state.py`
-- `scripts/square.py`, `scripts/square-view.py`, `scripts/world.py`, `scripts/customer.py`, `scripts/act.py`,
+- `scripts/square.py`, `scripts/square-view.py` (with `scripts/world/`, the 3D page), `scripts/world.py`, `scripts/customer.py`, `scripts/act.py`,
   `scripts/judge-pack.py`, `scripts/status.py`
 - `templates/`: character card, tester brief, scenario format, issue templates, context, stack-check, act-as and
   download-helper examples, and the fix, review and re-check briefs

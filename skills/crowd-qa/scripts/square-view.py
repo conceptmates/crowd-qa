@@ -257,7 +257,11 @@ def world_state(run, data):
     jobs = []
     for j in as_list(read(f"{s}/jobs.json", {}), "id"):
         jobs.append({k: j.get(k, "") for k in ("id", "role", "area", "status", "runner", "model", "thread", "persona", "started")})
-        jobs[-1]["result"] = result_word(j.get("result"))
+        res = read(j["result"], {}) if str(j.get("result", "")).endswith(".json") else j.get("result")
+        if isinstance(res, dict) and isinstance(res.get("results"), list):   # a recheck: the worst verdict wins
+            words = {result_word(r) for r in res["results"]}
+            res = next((w for w in ("fail", "partial", "pass") if w in words), "")
+        jobs[-1]["result"] = result_word(res) if j.get("role") == "recheck" else ""
     prs = []
     for pr in as_list(read(f"{s}/prs.json", {}), "area"):
         rc = pr.get("recheck") if isinstance(pr.get("recheck"), dict) else {}
@@ -275,7 +279,7 @@ def world_state(run, data):
             continue
         rounds = [{k: r.get(k, "") for k in ("by", "text", "severity", "reply")} for r in b.get("rounds") or [] if isinstance(r, dict)]
         bouts.append({"id": b.get("id") or os.path.basename(p)[:-5], "kind": b.get("kind", ""), "a": b.get("a", ""),
-                      "b": b.get("b", ""), "subject": b.get("subject", ""), "rounds": rounds, "winner": b.get("winner", ""),
+                      "b": b.get("b", ""), "subject": b.get("subject", ""), "rounds": rounds, "winner": b.get(b.get("winner"), b.get("winner", "")) if b.get("winner") in ("a", "b") else b.get("winner", ""),
                       "scores": b.get("scores") or {}, "status": b.get("status", "")})
     areas = read(f"{s}/areas.json", {}) or {}
     filed = read(f"{s}/filed.json", {}) or {}
