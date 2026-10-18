@@ -145,11 +145,15 @@ BE_DEPLOY_CMD=''                # single quotes keep \$BRANCH: 'ssh stack "cd ap
 BE_RESET_CMD=""                 # put the shared backend back on FIX_BASE
 CHECK_CMD=""                    # checks every fixer runs; per tracker: CHECK_CMD_app="pnpm exec tsc --noEmit -p ."
 RECHECK_COMMENT_HOST=""         # ssh host whose gh is the account that filed the issues (re-check comments come from it)
+MERGE_CHECK="on"                # when every area is finished: merge all fix branches in a scratch worktree, report order and conflicts
 BOUT_MAX="10"                   # disputes settled by a judge per day; fighters BOUT_FIGHTER_MODEL, judge BOUT_JUDGE_MODEL
 PRODUCT_NAME=""
 NOTIFY_CMD=""                   # optional: run with one message when the stack goes down or comes back
 SQUARE_LANG=""                  # en = the square refuses non-Latin scripts; empty = any language
 CROWD_TITLE=""                  # name shown at the top of the square page (default: the run dir name)
+SQUARE_SERVE="on"               # serve the 3D world and the square over HTTP (square-serve.py; never config or state)
+SQUARE_PORT="8790"              # first port tried
+SQUARE_BIND=""                  # empty = this machine's Tailscale address, else 127.0.0.1; 0.0.0.0 = every network
 EOF
 fi
 echo "crowd run dir ready: $RUN"

@@ -10,6 +10,7 @@ usage:
   crowd.py <run> approve    approve file-plan.md, then file
   crowd.py <run> jobs next|start|done|fail|requeue-running|list   fix jobs, for a t3 or subagent runner
   crowd.py <run> pr         rewrite every fix PR body from the results
+  crowd.py <run> merge-check   merge all fix branches per repo in a throwaway worktree: order, conflicts, checks
   crowd.py <run> status     one screen: every character-day, model spend so far
   crowd.py <run> makeup <new-run>   a new run dir with only the scenarios this run never finished (scripts/makeup.py)
 
@@ -1129,6 +1130,7 @@ def report():
              *[f"- {k}: {v.get('url') or 'no PR'} ({v.get('status')}; re-check pass {v.get('recheck', {}).get('pass')}, "
                f"partial {v.get('recheck', {}).get('partial')}, fail {v.get('recheck', {}).get('fail')})"
                for k, v in jload(os.path.join(RUN, "state", "prs.json"), {}).items()],
+             "", "## Merge check", read(os.path.join(RUN, "merge-check.md")) or "(not run)",
              "", "## Refused at filing",
              *[f"- {v['title']}: {v['reason']}" for v in jload(os.path.join(RUN, "state", "refused.json"), {}).values()]]
     pp = os.path.join(RUN, "state", "report-pack.md")
@@ -1697,6 +1699,8 @@ def fix():
                 break
             time.sleep(POLL)
     log("fix: every area is done or needs a person")
+    if cfg("MERGE_CHECK", "on") == "on":
+        merge_check()
 
 
 def finalize(area):
@@ -1771,6 +1775,20 @@ def finalize(area):
                          f"({b.get('scores', {}).get('a')} to {b.get('scores', {}).get('b')}). {b.get('reason', '')}")
             lines += [f"> {b['a']}: {r['text']}\n>\n> {b['b']}: {r['reply']}\n" for r in b["rounds"]]
         lines.append("</details>")
+    mc = jload(os.path.join(RUN, "state", "merge-check.json"), {}).get(a["tracker"], {})
+    if mc.get("order") or mc.get("conflicts"):
+        others = {n: areas[n].get("pr") for n in areas}
+        if area in mc.get("order", []):
+            i = mc["order"].index(area)
+            lines += ["", f"**Merge order:** {i + 1} of {len(mc['order'])}"
+                      + (f", after {', '.join(others.get(n) or n for n in mc['order'][:i])}" if i else ", first")
+                      + ". All fix branches of this repo merge cleanly in that order"
+                      + (f"; checks on the merged result {'pass' if mc['checks'].get('ok') else 'FAIL'}." if mc.get("checks") else ".")]
+        else:
+            files = next((c["files"] for c in mc.get("conflicts", []) if c["area"] == area), [])
+            lines += ["", f"**Merge conflict:** this branch does not merge cleanly after "
+                          f"{', '.join(others.get(n) or n for n in mc.get('order', [])) or 'the base'}: {', '.join(files[:12])}. "
+                          f"Rebase it after those merge."]
     lines += ["", "🤖 Generated with [Claude Code](https://claude.com/claude-code)"]
     body = "\n".join(lines) + "\n"
     bf = fix_path("jobs", f"pr-{area}.md")
@@ -1792,6 +1810,89 @@ def finalize(area):
                  "bugs": a["bugs"], "recheck": counts}
     jsave(os.path.join(RUN, "state", "prs.json"), prs)
     areas_save(areas)
+
+
+def merge_check():
+    """Once every area is finished: per repo, merge all fix branches into a throwaway worktree in the order that
+    conflicts least, run the checks on the result, and write the merge order into each PR body. Branches that do
+    not merge cleanly are named with the files they fight over. Nothing is pushed."""
+    areas = areas_load()
+    if not areas or not all(a["status"] in TERMINAL for a in areas.values()):
+        return None
+    out = jload(os.path.join(RUN, "state", "merge-check.json"), {})
+    base = cfg("FIX_BASE", "main")
+    for tr in sorted({a["tracker"] for a in areas.values()}):
+        mine = {n: a for n, a in areas.items() if a["tracker"] == tr and a.get("pr")}
+        src = repos().get(tr)
+        if not mine:
+            continue
+        if not src:
+            out[tr] = {"skipped": f"no local clone for {tr} in REPOS"}
+            log(f"merge-check: {tr} skipped (no local clone in REPOS)")
+            continue
+        wt = fix_path("merge-check", slug(tr))
+        sh(["git", "-C", src, "fetch", "-q", "origin", base, *[a["branch"] for a in mine.values()]])
+        if os.path.isdir(wt):
+            sh(["git", "-C", src, "worktree", "remove", "--force", wt])
+        os.makedirs(fix_path("merge-check"), exist_ok=True)
+        ref = f"origin/{base}" if not sh(["git", "-C", src, "rev-parse", "-q", "--verify", f"origin/{base}"]).returncode else base
+        r = sh(["git", "-C", src, "worktree", "add", "-q", "--detach", wt, ref])
+        if r.returncode:
+            out[tr] = {"skipped": f"worktree failed: {r.stderr.strip()[:200]}"}
+            continue
+        git = ["git", "-C", wt, "-c", "user.email=crowd-qa@local", "-c", "user.name=crowd-qa"]
+
+        def branch_ref(a):
+            return f"origin/{a['branch']}" if not sh(["git", "-C", src, "rev-parse", "-q", "--verify",
+                                                      f"origin/{a['branch']}"]).returncode else a["branch"]
+        order, left, conflicts = [], dict(mine), {}
+        progress = True
+        while left and progress:          # greedy: take every branch that merges cleanly now, then try the rest again
+            progress = False
+            for n in sorted(left, key=lambda n: len(left[n]["bugs"])):
+                r = sh(git + ["merge", "--no-ff", "--no-edit", "-q", branch_ref(left[n])])
+                if r.returncode:
+                    files = sh(git + ["diff", "--name-only", "--diff-filter=U"]).stdout.split()
+                    sh(git + ["merge", "--abort"])
+                    conflicts[n] = files
+                else:
+                    order.append(n)
+                    conflicts.pop(n, None)
+                    del left[n]
+                    progress = True
+        checks = {}
+        cmd = cfg(f"CHECK_CMD_{tr}", cfg("CHECK_CMD"))
+        if cmd and order:
+            prep = " && ".join(c for c in (cfg("FE_PREP_CMD"), cfg("FE_INSTALL_CMD")) if c and tracker_kind(tr) != "be")
+            r = subprocess.run(["bash", "-c", f"{prep + ' && ' if prep else ''}{cmd}"], cwd=wt, capture_output=True,
+                               text=True, timeout=cfg_int("MERGE_CHECK_TIMEOUT_S", 1800))
+            checks = {"cmd": cmd, "ok": r.returncode == 0, "tail": (r.stdout + r.stderr)[-3000:]}
+        out[tr] = {"order": order, "conflicts": [{"area": n, "files": f} for n, f in conflicts.items()],
+                   "checks": checks, "base": base}
+        log(f"merge-check: {tr}: merge order {' > '.join(order) or '-'}"
+            + (f"; conflicts: {', '.join(f'{n} ({len(f)} files)' for n, f in conflicts.items())}" if conflicts else "")
+            + (f"; checks {'pass' if checks.get('ok') else 'FAIL'} on all merged" if checks else ""))
+        sh(["git", "-C", src, "worktree", "remove", "--force", wt])
+    jsave(os.path.join(RUN, "state", "merge-check.json"), out)
+    lines = ["# Merge check", ""]
+    for tr, m in out.items():
+        if m.get("skipped"):
+            lines += [f"## {tr}", "", f"Skipped: {m['skipped']}", ""]
+            continue
+        lines += [f"## {tr}", "", "Merge in this order (each merges cleanly onto the ones before it):", ""]
+        lines += [f"{i}. {n}: {areas[n].get('pr')}" for i, n in enumerate(m["order"], 1)]
+        if m["conflicts"]:
+            lines += ["", "Do not merge cleanly after those:", ""]
+            lines += [f"- {c['area']} ({areas[c['area']].get('pr')}): {', '.join(c['files'][:12])}" for c in m["conflicts"]]
+        if m.get("checks"):
+            lines += ["", f"Checks on everything merged together (`{m['checks']['cmd']}`): "
+                          f"{'pass' if m['checks']['ok'] else 'FAIL'}"]
+        lines.append("")
+    with open(os.path.join(RUN, "merge-check.md"), "w") as f:
+        f.write("\n".join(lines))
+    for n in areas:
+        finalize(n)
+    return out
 
 
 def jobs_cli(args):
@@ -1824,6 +1925,9 @@ def jobs_cli(args):
         print(f"{args[1]} running")
     elif sub == "done":
         ok = job_done(args[1])
+        if cfg("MERGE_CHECK", "on") == "on" and areas_load() and all(a["status"] in TERMINAL for a in areas_load().values()) \
+                and not os.path.exists(os.path.join(RUN, "state", "merge-check.json")):
+            merge_check()
         print(json.dumps({"ok": ok, "ready": sum(1 for j in jobs_load().values() if j["status"] == "queued"),
                           "areas": {k: v["status"] for k, v in areas_load().items()}}))
     elif sub == "fail":
@@ -1889,6 +1993,8 @@ def status():
         if os.path.exists(os.path.join(RUN, k)):
             print(f"{k}: {read(os.path.join(RUN, k)).strip()}")
     subprocess.run(["python3", os.path.join(SCRIPTS, "status.py"), RUN])
+    if read(os.path.join(RUN, "square", "URL")).strip():
+        print("live pages: " + " ".join(read(os.path.join(RUN, "square", "URL")).split()))
     if areas_load():
         print("fix areas: " + ", ".join(f"{k}={a['status']}" + (f" {a['pr']}" if a.get("pr") else "")
                                         for k, a in areas_load().items()))
@@ -1916,6 +2022,11 @@ def main():
         for area in areas_load():
             finalize(area)
         return
+    if CMD == "merge-check":
+        if os.path.exists(os.path.join(RUN, "state", "merge-check.json")):
+            os.remove(os.path.join(RUN, "state", "merge-check.json"))
+        return print(read(os.path.join(RUN, "merge-check.md"))) if merge_check() is not None else \
+            print("merge-check: not every area is finished yet")
     if CMD == "makeup":
         if len(sys.argv) < 4:
             sys.exit("usage: crowd.py <run> makeup <new-run> [--scen-max N]")

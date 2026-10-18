@@ -27,6 +27,11 @@ nine agents and re-tested by their reporters, into steps crowd.py tracks on disk
    then Needs backend, Not changed, open points, and the checks, review and bouts in collapsed blocks. An area with
    anything left over is labelled `needs-human`. The PR stays a draft.
 
+8. **merge check** (`MERGE_CHECK=on`, when every area is finished): per repo, every fix branch is merged into a
+   throwaway worktree from the local clone, in the order that conflicts least. The checks run on the merged
+   result. `merge-check.md` and each PR body give the merge order, or the files a branch conflicts on. Nothing is
+   pushed. Run it again by hand with `crowd.py <run> merge-check`.
+
 No agent sees another agent's transcript. Every prompt is built from files: the brief, the issue and its comments,
 the card, the diff, the evidence. The reviewer never sees the fixer's explanation, and the re-checker judges
 against the issue, not the PR description.

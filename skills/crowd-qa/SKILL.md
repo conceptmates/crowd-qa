@@ -134,8 +134,9 @@ While `square-view.py` runs, `$RUN/square/index.html` is the run as a 3D town: c
 product building (testing), the bench, the courthouse (being judged), the plaza (their posts as speech bubbles)
 and their houses, and in the fix stage between the workshop, the review booth, the arena (bouts) and the harbour
 (one boat per PR). Click anyone for their card; job cards link to their T3 thread. `square.html` is the
-Discord-style square of every post and reply, with filters; both read `square/state.json`. Serve the folder over
-HTTP to share it (`python3 -m http.server --directory $RUN`).
+Discord-style square of every post and reply, with filters; both read `square/state.json`. `restart-watchers.sh`
+also serves them (`square-serve.py`, only the pages and screenshots, never config or state) on this machine's
+Tailscale address and prints the URL; `crowd.py status` repeats it. Give the user that URL at launch.
 
 Keep checking from a short session with `status` rather than a long chat that re-reads itself every turn.
 Change capacity (`HARD_CAP`, `SWAP_MAX_MB`, the device pool) in `config.env`: runners read it at every start,
@@ -158,7 +159,7 @@ jobs in one context and never pass one agent's transcript to another; the job pr
 ## Step 8: Report to the user
 Issues filed per tracker (number, severity, title, URL, reporter, confirmers), what was commented on, filed as a
 regression, skipped or refused at filing and why, the fix PRs (per area: URL, re-check PASS / PARTIAL / FAIL,
-needs-human points, bouts), the launch verdict from `LAUNCH_REPORT.md`, stack faults found, characters or days
+needs-human points, bouts) and the merge order from `merge-check.md`, the launch verdict from `LAUNCH_REPORT.md`, stack faults found, characters or days
 nobody could test, and the spend from `crowd.py status`. Quote only URLs the tracker returned.
 
 ## When something goes wrong
@@ -200,7 +201,7 @@ nobody could test, and the spend from `crowd.py status`. Quote only URLs the tra
 - `scripts/preflight.sh`, `scripts/init-crowd.sh`, `scripts/resume.sh`, `scripts/restart-watchers.sh`
 - `scripts/api-watch.sh`, `scripts/watchdog.sh`, `scripts/capacity.sh`, `scripts/device-pool.sh`,
   `scripts/tunnel.sh`, `scripts/net-stall.sh`, `scripts/memlog.sh`, `scripts/state-saver.sh`, `scripts/save-state.py`
-- `scripts/square.py`, `scripts/square-view.py` (with `scripts/world/`, the 3D page), `scripts/world.py`, `scripts/customer.py`, `scripts/act.py`,
+- `scripts/square.py`, `scripts/square-view.py` (with `scripts/world/`, the 3D page), `scripts/square-serve.py`, `scripts/world.py`, `scripts/customer.py`, `scripts/act.py`,
   `scripts/judge-pack.py`, `scripts/status.py`
 - `templates/`: character card, tester brief, scenario format, issue templates, context, stack-check, act-as and
   download-helper examples, and the fix, review and re-check briefs

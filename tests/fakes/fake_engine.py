@@ -162,8 +162,11 @@ def model_step(prompt, resumed=False):
         json.dump(ans, open(out, "w"))
     elif step == "group":
         bugs = json.loads(re.search(r"Bugs: (\[.*\])\nAnswer", prompt, re.S).group(1))
-        json.dump({"areas": [{"name": "Inbox flows", "tracker": bugs[0]["tracker"], "bugs": [b["key"] for b in bugs],
-                              "files": ["src/app.js"]}]}, open(out, "w"))
+        if os.environ.get("FAKE_GROUP_SPLIT"):
+            areas = [{"name": f"area {i}", "tracker": b["tracker"], "bugs": [b["key"]], "files": []} for i, b in enumerate(bugs)]
+        else:
+            areas = [{"name": "Inbox flows", "tracker": bugs[0]["tracker"], "bugs": [b["key"] for b in bugs], "files": ["src/app.js"]}]
+        json.dump({"areas": areas}, open(out, "w"))
     elif step.startswith("bout:"):
         if step.endswith(":judge") and os.environ.get("FAKE_BOUT_NO_VERDICT"):
             open(out, "w").write("{}")
@@ -186,6 +189,11 @@ def job_agent(prompt):
     keys = re.findall(r"- #(\d+) `([0-9a-f]+)` reported by \*\*([^*]+)\*\*", prompt)
     flag = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(res))), ".fake-" + role)
     record("job", role=role, result=res, keys=[k for _, k, _ in keys], cwd=os.getcwd(), prompt=prompt)
+    if role == "fix" and os.environ.get("FAKE_FIX_COMMIT"):   # every fixer edits the same line of one file
+        open("shared.txt", "w").write(f"fixed by {res}\n")
+        g = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run(g + ["add", "shared.txt"], capture_output=True)
+        subprocess.run(g + ["commit", "-q", "-m", "fix"], capture_output=True)
     if role == "fix":
         rebut = os.environ.get("FAKE_REBUT") and "Review comments to address" in prompt
         ans = {"branch": re.search(r"Branch: `([^`]+)`", prompt).group(1), "worktree": os.getcwd(),

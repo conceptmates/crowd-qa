@@ -558,6 +558,22 @@ class Fixing(unittest.TestCase):
         reviews = [k for k in json.load(open(r.path("state", "jobs.json"))) if k.startswith("review-")]
         self.assertEqual(len(reviews), 1)
 
+    def test_the_merge_check_orders_the_branches_and_names_the_conflict(self):
+        r = self.fix_run("fixmerge", "RUNNER=cli CHECK_CMD=true")
+        r.env.update(FAKE_GROUP_SPLIT="1", FAKE_FIX_COMMIT="1")
+        res = r.crowd("all", timeout=400)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        mc = json.load(open(r.path("state", "merge-check.json")))["app"]
+        self.assertEqual(mc["order"], ["area-0"])
+        self.assertEqual(mc["conflicts"], [{"area": "area-1", "files": ["shared.txt"]}])
+        self.assertTrue(mc["checks"]["ok"])
+        self.assertIn("Do not merge cleanly", r.read("merge-check.md"))
+        bodies = {c["body"].split("area **")[1].split("**")[0]: c["body"] for c in r.calls(kind="gh-pr-edit")}
+        self.assertIn("**Merge order:** 1 of 1, first", bodies["area-0"])
+        self.assertIn("**Merge conflict:**", bodies["area-1"])
+        self.assertIn("shared.txt", bodies["area-1"])
+        self.assertFalse(os.path.exists(r.path("fix", "merge-check", "app")), "the scratch worktree is removed")
+
     def test_retries_run_out_and_the_pr_is_labelled_needs_human(self):
         r = self.fix_run("fixhuman", "RUNNER=cli FIX_RETRIES=0")
         r.env["FAKE_RECHECK_FAIL_ONCE"] = "1"
