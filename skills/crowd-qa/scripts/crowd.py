@@ -1042,7 +1042,7 @@ def file_issues():
                 with LOCK:
                     act = plan.get(x["key"], {}).get("action", "create")
                     if url:
-                        done[x["key"]] = {"url": url, "title": x["title"], "tracker": key, "action": act,
+                        done[x["key"]] = {"url": url, "issue": url.split("#")[0], "title": x["title"], "tracker": key, "action": act,
                                           "target": plan.get(x["key"], {}).get("target"), "reporter": x.get("reporter"),
                                           "severity": x.get("severity")}
                         num = re.search(r"/issues/(\d+)", url)

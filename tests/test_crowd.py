@@ -482,7 +482,7 @@ class EdgeCases(unittest.TestCase):
         r.crowd("all")
         filed = json.load(open(r.path("state", "filed.json")))
         self.assertEqual(json.load(open(r.path("state", "refused.json"))), {}, "a filing error is not a refusal")
-        self.assertIn("https://github.com/owner/app/issues/77", [v["url"] for v in filed.values()])
+        self.assertIn("https://github.com/owner/app/issues/77", [v["issue"] for v in filed.values()])
         self.assertEqual(len(filed), 1)
         r.crowd("file")
         filed = json.load(open(r.path("state", "filed.json")))
