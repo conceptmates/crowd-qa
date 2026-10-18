@@ -922,5 +922,113 @@ class Makeup(unittest.TestCase):
         self.assertEqual(json.load(open(os.path.join(new, "lanes", "maya", "round1", "verdict.json")))["scenarios"]["ran"], ["S1", "S2"])
 
 
+class SquareView(unittest.TestCase):
+    """square-view.py: state.json for the 3D world, index.html (world) and square.html (2D) from one pass."""
+
+    SHAPE = {"run": {"name", "date", "days", "stage", "updated"},
+             "characters": {"id", "name", "role", "surface", "status", "day", "done", "total", "bugs", "color", "shot"},
+             "posts": {"id", "author", "kind", "text", "ts", "parent", "shot"},
+             "bugs": {"key", "title", "severity", "reporter", "confirmers", "state", "url", "area"},
+             "jobs": {"id", "role", "area", "status", "runner", "model", "thread", "persona", "started"},
+             "bouts": {"id", "kind", "a", "b", "subject", "rounds", "winner", "scores", "status"},
+             "prs": {"area", "url", "number", "status", "bugs", "recheck"}}
+
+    def render(self, r):
+        res = subprocess.run(["python3", os.path.join(SKILL, "scripts", "square-view.py"), r.dir], capture_output=True, text=True, timeout=60)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return json.load(open(r.path("square", "state.json")))
+
+    def assertShape(self, st):
+        self.assertEqual(set(st), set(self.SHAPE))
+        self.assertTrue(self.SHAPE["run"] <= set(st["run"]))
+        for k, keys in self.SHAPE.items():
+            for item in ([] if k == "run" else st[k]):
+                self.assertTrue(keys <= set(item), f"{k}: missing {keys - set(item)}")
+
+    def test_state_json_from_every_pipeline_source(self):
+        r = Run("squareview", lanes("maya", "leo", "ana", "bo", "cy"), config="DAYS=2")
+        S = r.path("state")
+
+        def put(rel, obj):
+            os.makedirs(os.path.dirname(r.path(*rel.split("/"))), exist_ok=True)
+            with open(r.path(*rel.split("/")), "w") as f:
+                f.write(obj if isinstance(obj, str) else json.dumps(obj))
+        for lane, st in (("maya", "running"), ("bo", "waiting-stack"), ("cy", "waiting")):
+            put(f"lanes/{lane}/round1/report.json", {"scenarios": [{"id": "S1", "status": "pass"}]})
+            put(f"lanes/{lane}/state.json", {"status": st, "surface": "web"})
+        put("lanes/maya/round1/shots/S1.png", "png")
+        for lane in ("leo", "ana"):
+            put(f"lanes/{lane}/round1/report.json", {"scenarios": [{"id": "S1", "status": "pass"}]})
+            put(f"lanes/{lane}/round1/DONE", "exit=0 engine=claude\n")
+            put(f"lanes/{lane}/state.json", {"status": "done"})
+        put("lanes/ana/round1/verdict.json", {"verified_findings": [{"title": "Pay button double charges"}]})
+        with open(r.path("square", "feed.jsonl"), "w") as f:
+            for e in ({"id": "P1", "author": "maya", "kind": "post", "text": "Checkout hangs", "ts": "2026-10-18T10:00:00",
+                       "shot": r.path("lanes", "maya", "round1", "shots", "S1.png")},
+                      {"id": "P2", "author": "leo", "kind": "me-too", "ref": "P1", "text": "Same", "ts": "2026-10-18T10:05:00"},
+                      {"id": "P3", "author": "ana", "kind": "cant-repro", "ref": "P1", "text": "Works for me", "ts": "2026-10-18T10:06:00"}):
+                f.write(json.dumps(e) + "\n")
+            f.write("not json\n")
+        put("state/issues.json", [{"key": "k1", "title": "Pay button double charges", "severity": "high", "reporter": "ana",
+                                   "confirmers": [{"id": "maya"}, {"id": "S3"}]},
+                                  {"key": "k2", "title": "Avatar upload spins", "severity": "low", "reporter": "maya", "confirmers": []},
+                                  {"key": "k3", "title": "Stack fault", "severity": "low", "reporter": "leo", "confirmers": []}])
+        put("state/filed.json", {"k1": {"url": "https://github.com/o/a/issues/1", "title": "Pay button double charges"}})
+        put("state/file-plan.json", [{"key": "k1", "action": "create"}, {"key": "k2", "action": "comment", "target": "#4"},
+                                     {"key": "k3", "action": "skip", "reason": "stack"}])
+        put("state/areas.json", {"payments": ["k1"], "profile": ["k2"]})
+        put("state/jobs.json", {
+            "fix-payments": {"role": "fix", "area": "payments", "status": "done", "runner": "t3", "model": "opus", "thread": "thr_1"},
+            "review-payments": {"role": "review", "area": "payments", "status": "done", "runner": "cli", "model": "codex"},
+            "recheck-ana": {"role": "recheck", "area": "payments", "status": "running", "runner": "subagent", "persona": "ana"},
+            "recheck-cy": {"role": "recheck", "area": "profile", "status": "done", "persona": "cy", "result": {"verdict": "PASS"}}})
+        put("state/bouts/b1.json", {"id": "b1", "kind": "disagree", "a": "ana", "b": "maya", "subject": "P3",
+                                    "rounds": [{"by": "ana", "text": "Cannot reproduce", "severity": "medium"}], "winner": "maya",
+                                    "scores": {"ana": 4, "maya": 7}, "status": "decided"})
+        put("state/bouts/broken.json", "[1, 2]")
+        put("state/prs.json", {"payments": {"url": "https://github.com/o/a/pull/9", "number": 9, "status": "draft", "bugs": ["k1"],
+                                            "recheck": {"pass": 1, "partial": 0, "fail": 0}},
+                               "profile": {"url": "", "number": "", "status": "open", "bugs": ["k2"]}})
+        st = self.render(r)
+        self.assertShape(st)
+        self.assertEqual(st["run"]["stage"], "recheck", "a recheck job is running")
+        self.assertEqual(st["run"]["days"], 2)
+        status = {c["id"]: c["status"] for c in st["characters"]}
+        self.assertEqual(status, {"maya": "testing", "leo": "judged", "ana": "rechecking", "bo": "blocked", "cy": "waiting"})
+        self.assertEqual(len({c["color"] for c in st["characters"]}), 5, "every character gets its own colour")
+        maya = [c for c in st["characters"] if c["id"] == "maya"][0]
+        self.assertEqual(maya["shot"], "../lanes/maya/round1/shots/S1.png")
+        self.assertEqual([(p["kind"], p["parent"]) for p in st["posts"]], [("post", ""), ("metoo", "P1"), ("cantrepro", "P1")])
+        bugs = {b["key"]: b for b in st["bugs"]}
+        self.assertEqual(bugs["k1"]["state"], "in-pr")
+        self.assertEqual(bugs["k1"]["url"], "https://github.com/o/a/issues/1")
+        self.assertEqual(bugs["k1"]["area"], "payments")
+        self.assertEqual(bugs["k1"]["confirmers"], ["maya"], "scenario ids are not characters")
+        self.assertEqual(bugs["k3"]["state"], "skipped")
+        self.assertEqual({b["id"] for b in st["bouts"]}, {"b1"}, "a malformed bout file is skipped")
+        self.assertEqual(st["bouts"][0]["rounds"][0]["by"], "ana")
+        prs = {p["area"]: p for p in st["prs"]}
+        self.assertEqual(prs["payments"]["recheck"], {"pass": 1, "partial": 0, "fail": 0})
+        self.assertEqual(prs["profile"]["recheck"], {"pass": 1, "partial": 0, "fail": 0}, "counted from finished recheck jobs")
+        index = r.read("square", "index.html")
+        self.assertIn('"three"', index)
+        self.assertIn('id="state"', index, "state is inlined for file://")
+        self.assertNotIn('src="world.js"', index, "world.js is inlined: browsers refuse module files from file://")
+        self.assertIn("square.html", index)
+        for f in ("square.html", "state.js", "square-data.js"):
+            self.assertTrue(os.path.exists(r.path("square", f)), f)
+        self.assertIn('"Checkout hangs"', r.read("square", "square-data.js"), "the 2D page polls this in place")
+
+    def test_a_fresh_run_gives_empty_lists_not_a_crash(self):
+        r = Run("squareview-empty", lanes("maya"), plans=False)
+        os.remove(r.path("square", "feed.jsonl"))
+        st = self.render(r)
+        self.assertShape(st)
+        self.assertEqual(st["run"]["stage"], "plan")
+        self.assertEqual([st[k] for k in ("posts", "bugs", "jobs", "bouts", "prs")], [[], [], [], [], []])
+        self.assertEqual(st["characters"][0]["status"], "waiting")
+        self.assertTrue(os.path.exists(r.path("square", "square.html")))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
