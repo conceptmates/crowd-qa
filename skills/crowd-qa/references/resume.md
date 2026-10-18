@@ -52,3 +52,9 @@ To run a day again (its world was lost), move that day's `round<N>/` into `archi
   then reports every scenario as blocked. Say in `context.md` which workspace holds the data.
 - **Quota false positive.** A tester that quotes earlier feedback about a usage limit must not count as a
   limit; only the tester CLI's own error line does.
+- **Fix stage after a restart.** `state/file-plan.json` and `state/FILE_PLAN_APPROVED` keep the filing decision;
+  `state/areas-detail.json` each area's attempt, verdicts and PR; `state/jobs.json` every job with its runner,
+  model and thread; `fix/jobs/<id>/result.json` what each agent reported. A job is finished only when
+  `crowd.py <run> jobs done <id>` accepted its result. With the cli runner, `resume.sh` restarts crowd.py and
+  it carries on. With t3, check each running job's thread before anything else; with subagent, run
+  `crowd.py <run> jobs requeue-running` (`references/fixing.md`).

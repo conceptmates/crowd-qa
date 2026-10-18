@@ -1,6 +1,6 @@
 ---
 name: crowd-qa
-description: Launch-week crowd QA for a web app, mobile app, CLI or HTTP API. Named characters (a designer, a boundary tester, a speedy user, and people drawn from the product's own users) each use the product over simulated days, post on a shared town square, confirm each other's bugs, use what other characters made, and keep a diary between days. Every day is judged against screenshots and source, stack faults are thrown out, and the bugs that hold up are filed in the reporter's voice with evidence, ending in a launch-readiness report. The run loop is a script (crowd.py), so a model is only called where judgement is needed. Use this whenever the user wants end-to-end testing "as if we released it to 20 people", persona or character testing, simulated users, MiroFish-style QA, a pre-launch crowd test, or bug reports written by personas, even if they never say "crowd".
+description: Launch-week crowd QA for a web app, mobile app, CLI or HTTP API. Named characters (a designer, a boundary tester, a speedy user, and people drawn from the product's own users) each use the product over simulated days, post on a shared town square, confirm each other's bugs, use what other characters made, and keep a diary between days. Every day is judged against screenshots and source, stack faults are thrown out, and the bugs that hold up are filed in the reporter's voice with evidence after a duplicate check against every existing issue and comment. Optionally the filed bugs are then fixed: a fixer per area in its own worktree, a reviewer on another model, a re-test by each bug's reporter, disputes settled by a judge, and a draft PR per area with before/after evidence. It ends in a launch-readiness report. The run loop is a script (crowd.py), so a model is only called where judgement is needed. Use this whenever the user wants end-to-end testing "as if we released it to 20 people", persona or character testing, simulated users, MiroFish-style QA, a pre-launch crowd test, or bug reports written by personas, even if they never say "crowd".
 ---
 
 # crowd-qa
@@ -11,7 +11,8 @@ calls (scheduling, waiting, retries, coverage, evidence checks, merging, filing)
 which is why a 30-character run costs a few hundred dollars instead of about a thousand (`references/cost.md`).
 
 You plan with the user, write the characters, check the stack, launch `crowd.py`, and report. You do not test
-the product yourself and you do not fix anything it finds unless the user asks.
+the product yourself. Fixing is a separate stage the user opts into (`FIXING=on`, Step 7); you never fix a bug by
+hand.
 
 Read `references/lessons.md` before the first launch on a new machine: each line is a failure that cost a real
 run hours, and what now prevents it.
@@ -37,8 +38,12 @@ per call, recommended option first. Ask only what earlier answers have settled.
    testers may create or delete, data they must never touch. A missing credential becomes a blocked scenario.
 5. **Output.** Trackers per bug kind (`TRACKERS="app=owner/app backend=owner/api"`, or a `FILE_CMD` hook for
    another tracker), the evidence branch, the run label. Whether to file at all (`FILING=off` stops at the
-   merged list).
-6. **Read-back.** Restate the plan in one short table and ask what is missing. Nothing starts before the user
+   merged list). Filing waits for the user to approve `file-plan.md` unless they choose `FILE_AUTO=yes`.
+6. **Fixing.** Whether to fix what is filed (`FIXING=on`, `references/fixing.md`). If yes: the runner (`t3` when
+   the T3 tools answer and the product repo is a T3 project, else `subagent`, or `cli` for an unattended run),
+   local clones (`REPOS`), how a worktree becomes a running frontend (`FE_*`) and how a backend branch is
+   deployed (`BE_*`), the checks fixers must pass, and which account the reporters' re-check comments come from.
+7. **Read-back.** Restate the plan in one short table and ask what is missing. Nothing starts before the user
    confirms.
 
 ## Step 2: Run dir, config and stack
@@ -113,19 +118,49 @@ python3 "$RUN/scripts/crowd.py" "$RUN" status        # whenever you or the user 
    finished, not when it has been judged, and days do not wait for each other. Each day is judged as soon as
    it ends: coverage, missing evidence and duplicates are checked in code, then a judge looks at what is left.
 3. **dedupe**: merges findings across characters; other reporters become "Also hit by".
-4. **file**: one check per merged bug (evidence and source at the current checkout, intended behaviour, stack
-   faults, existing issues), then the issue is filed. A wrong screenshot is replaced, not refused.
-5. **report**: `LAUNCH_REPORT.md`, rewritten only when its inputs changed.
+4. **file**: a snapshot of every issue in each repo, open and closed, with bodies and comments, and one model
+   pass over the whole batch: create, comment "Also hit by" on an open issue, file a regression of a closed fixed
+   one, or skip when an issue or comment says the behaviour is intended. That is `file-plan.md`, and nothing is
+   sent until it is approved (Step 6). Then one check per bug (evidence and source at the current checkout,
+   intended behaviour, stack faults; a bug another character could not reproduce meets them in a bout first),
+   and it is filed or commented. A wrong screenshot is replaced, not refused.
+5. **fix** (with `FIXING=on`): Step 7.
+6. **report**: `LAUNCH_REPORT.md`, rewritten only when its inputs changed.
 
 Steps can also run alone (`crowd.py "$RUN" file`). Model steps default to Opus (`PLANNER_MODEL`,
 `JUDGE_MODEL`, `VERIFY_MODEL`, `REPORT_MODEL`); testers use the engines from Step 1.
 
-The square, a Discord-style page of every post and reply, is at `$RUN/square/index.html` while
-`square-view.py` runs.
+While `square-view.py` runs, `$RUN/square/index.html` is the run as a 3D town: characters walk between the
+product building (testing), the bench, the courthouse (being judged), the plaza (their posts as speech bubbles)
+and their houses, and in the fix stage between the workshop, the review booth, the arena (bouts) and the harbour
+(one boat per PR). Click anyone for their card; job cards link to their T3 thread. `square.html` is the
+Discord-style square of every post and reply, with filters; both read `square/state.json`. `restart-watchers.sh`
+also serves them (`square-serve.py`, only the pages and screenshots, never config or state) on this machine's
+Tailscale address and prints the URL; `crowd.py status` repeats it. Give the user that URL at launch.
 
 Keep checking from a short session with `status` rather than a long chat that re-reads itself every turn.
 Change capacity (`HARD_CAP`, `SWAP_MAX_MB`, the device pool) in `config.env`: runners read it at every start,
 so nothing needs a restart.
+
+## Step 6: Approve the file plan
+When the file step stops at the plan, show the user `file-plan.md`: how many new issues, comments on open issues,
+regressions and skips, with the reason (and the quoted comment) for each match. They may edit
+`state/file-plan.json` (action `create|comment|regression|skip`). On their go:
+`python3 "$RUN/scripts/crowd.py" "$RUN" approve` files, then `crowd.py "$RUN" all` continues with fixing and the
+report.
+
+## Step 7: Fix (FIXING=on)
+Read `references/fixing.md` first. With the `cli` runner, crowd.py does everything. With `t3` or `subagent`, you
+run the job loop: `crowd.py "$RUN" jobs next`, launch each job as its own T3 thread or subagent (models picked from
+the live catalog: Opus fixes, another provider reviews, Sonnet re-checks, spread over the Claude accounts), then
+`jobs start` and `jobs done` as each one finishes, until every area is `done` or `needs-human`. Never put two
+jobs in one context and never pass one agent's transcript to another; the job prompt is all an agent gets.
+
+## Step 8: Report to the user
+Issues filed per tracker (number, severity, title, URL, reporter, confirmers), what was commented on, filed as a
+regression, skipped or refused at filing and why, the fix PRs (per area: URL, re-check PASS / PARTIAL / FAIL,
+needs-human points, bouts) and the merge order from `merge-check.md`, the launch verdict from `LAUNCH_REPORT.md`, stack faults found, characters or days
+nobody could test, and the spend from `crowd.py status`. Quote only URLs the tracker returned.
 
 ## When something goes wrong
 - **The stack goes down.** `api-watch.sh` writes `STACK_DOWN` after two failed checks; no character starts,
@@ -143,11 +178,6 @@ so nothing needs a restart.
 - **A day must run again** (its data was lost): move that `lanes/<id>/round<N>/` into `archive/<reason>/` and
   resume. Verified findings from archived days can go in `archive/<reason>/prior_findings.json`.
 
-## Step 6: Report to the user
-Issues filed per tracker (number, severity, title, URL, reporter, confirmers), what was refused at filing and
-why, the launch verdict from `LAUNCH_REPORT.md`, stack faults found, characters or days nobody could test, and
-the spend from `crowd.py status`. Quote only URLs the tracker returned.
-
 ## What the judges hold to
 - A finding needs evidence that shows it. A me-too counts only with its own screenshot; a can't-repro is kept,
   since it narrows the cause.
@@ -159,7 +189,10 @@ the spend from `crowd.py status`. Quote only URLs the tracker returned.
 - Day 2 re-checks day 1's bugs instead of reporting them again; a repeat is rejected in code.
 
 ## Files
-- `scripts/crowd.py`: the run loop (plan, run, judge, dedupe, file, report, status)
+- `scripts/crowd.py`: the run loop (plan, run, judge, dedupe, file plan, file, fix jobs, bouts, PR bodies,
+  report, status)
+- `scripts/fix-stack.sh` (a dev server per area, the backend queue), `scripts/fix-browser.sh` (a browser per job),
+  `scripts/evidence.sh` (evidence pushes that never overwrite each other)
 - `scripts/run-tester.sh`: one character-day on any surface; per-character engine, lean Claude sessions in
   budget chunks, stack probe before start, per-engine quota pauses, browser slots
 - `scripts/quota-guard.sh`: account rotation through caam; `scripts/makeup.py`: a run of what was left
@@ -168,10 +201,10 @@ the spend from `crowd.py status`. Quote only URLs the tracker returned.
 - `scripts/preflight.sh`, `scripts/init-crowd.sh`, `scripts/resume.sh`, `scripts/restart-watchers.sh`
 - `scripts/api-watch.sh`, `scripts/watchdog.sh`, `scripts/capacity.sh`, `scripts/device-pool.sh`,
   `scripts/tunnel.sh`, `scripts/net-stall.sh`, `scripts/memlog.sh`, `scripts/state-saver.sh`, `scripts/save-state.py`
-- `scripts/square.py`, `scripts/square-view.py`, `scripts/world.py`, `scripts/customer.py`, `scripts/act.py`,
+- `scripts/square.py`, `scripts/square-view.py` (with `scripts/world/`, the 3D page), `scripts/square-serve.py`, `scripts/world.py`, `scripts/customer.py`, `scripts/act.py`,
   `scripts/judge-pack.py`, `scripts/status.py`
 - `templates/`: character card, tester brief, scenario format, issue templates, context, stack-check, act-as and
-  download-helper examples
-- `references/`: `engines.md` (the engine question), `cost.md`, `lessons.md`, `resume.md`, `hooks.md`,
+  download-helper examples, and the fix, review and re-check briefs
+- `references/`: `fixing.md` (the fix stage and the job loop), `engines.md` (the engine question), `cost.md`, `lessons.md`, `resume.md`, `hooks.md`,
   `remote-stack.md`, `mirofish-mapping.md`
 - `tests/test_crowd.py` in the repo: the scripts end to end with fake engines, offline

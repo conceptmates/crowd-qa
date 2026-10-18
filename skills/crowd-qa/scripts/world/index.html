@@ -1,0 +1,35 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>crowd · world</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,">
+<script>
+// Old links to the 2D page (index.html#square, #<character>) still land on it; no WebGL also means the 2D page.
+(function () {
+  if (location.hash && location.hash !== "#world") return location.replace("square.html" + location.hash);
+  var ok = false;
+  try { var c = document.createElement("canvas"); ok = !!(window.WebGLRenderingContext && (c.getContext("webgl2") || c.getContext("webgl"))) } catch (e) {}
+  if (!ok) location.replace("square.html");
+  setTimeout(function () { if (!window.__worldReady) location.replace("square.html") }, 15000);
+})();
+</script>
+<script type="importmap">{"imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"}}</script>
+<link rel="stylesheet" href="world.css">
+<!--STATE-->
+</head><body>
+<div id="scene"></div>
+<header id="hud">
+  <div class="title"><b id="run-name">crowd</b><span id="updated"></span></div>
+  <ol id="steps"></ol>
+  <div id="counters"></div>
+</header>
+<nav id="tools">
+  <a class="tbtn" href="square.html" title="The 2D square, full page">2D</a>
+  <button class="tbtn primary" id="sq-toggle" title="Show the square beside the town (S)">Square</button>
+</nav>
+<aside id="card" hidden><button class="x" aria-label="Close">×</button><div class="body"></div></aside>
+<aside id="sq" aria-hidden="true"><iframe title="Town square" id="sq-frame"></iframe></aside>
+<div id="loading">Building the town…</div>
+<div id="hint">drag to orbit · scroll to zoom · click anyone</div>
+<script type="module" src="world.js"></script>
+</body></html>

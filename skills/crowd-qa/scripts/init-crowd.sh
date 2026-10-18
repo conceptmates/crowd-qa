@@ -9,6 +9,7 @@ case "$RUN" in /tmp/*|/private/tmp/*) echo "refusing /tmp: a reboot wipes it; us
 SKILL="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$RUN"/{lanes,scripts,templates,references,square,world,state,logs,archive,.runner,.devices,.active}
 cp "$SKILL"/scripts/*.sh "$SKILL"/scripts/*.py "$RUN/scripts/"
+mkdir -p "$RUN/scripts/world"; cp "$SKILL"/scripts/world/* "$RUN/scripts/world/"   # the 3D page square-view.py writes
 cp "$SKILL"/templates/* "$RUN/templates/"
 mkdir -p "$RUN/references"; cp "$SKILL"/references/*.md "$RUN/references/"
 chmod +x "$RUN"/scripts/*.sh
@@ -118,9 +119,41 @@ RUN_LABEL=""                    # label on every issue, e.g. crowd-qa-2026-10-08
 RUN_DATE=""
 TESTER_LABEL=""                 # shown in each issue footer, e.g. "Sonnet 5.5 and Codex"
 FILE_CMD=""                     # empty = GitHub via gh; else a command that files one issue from a JSON file
+FILE_AUTO="no"                  # yes = file without waiting for approval of file-plan.md (crowd.py <run> approve)
+PLAN_MODEL=""                   # the batch duplicate check against every issue and comment (default VERIFY_MODEL)
+
+# ---- fixing (after filing): an area per group of bugs, fixer -> reviewer -> re-check by the reporters -> draft PR
+FIXING="off"                    # on = run the fix stage after filing
+RUNNER="auto"                   # t3 | subagent | cli. auto = the orchestrating session decides (cli when crowd.py
+                                #   runs alone). t3 and subagent: the session launches jobs (crowd.py <run> jobs next)
+REPOS=""                        # local clones per tracker, for cli/subagent worktrees: "app=/path/app backend=/path/api"
+TRACKER_KIND=""                 # "app=fe backend=be": fe areas run dev servers side by side, be areas queue
+FIX_BASE="main"                 # branch fixes start from and PRs target
+FIX_PARALLEL="4"                # jobs at once
+FIX_RETRIES="2"                 # fix rounds after a failed re-check before the PR is labelled needs-human
+REVIEW_ROUNDS="2"               # fix rounds a review may ask for
+FIX_PORT_BASE="3101"            # area dev servers get FIX_PORT_BASE + n
+FIX_AREA_MAX="20"               # bugs per area
+FIX_MODEL="auto"                # per role, "auto" or engine:model (claude:opus, codex:gpt-6-luna); t3 picks from the
+REVIEW_MODEL="auto"             #   live catalog: fixer Opus, reviewer another provider (Codex) when there is one,
+RECHECK_MODEL="auto"            #   re-check Sonnet
+REVIEW_ENGINE=""                # cli runner: codex | claude for the reviewer (default codex when installed)
+FE_PREP_CMD=""                  # run in a worktree before every install (tool config the install needs)
+FE_INSTALL_CMD=""               # e.g. pnpm install --frozen-lockfile --prefer-offline
+FE_DEV_CMD=''                   # single quotes keep \$PORT for the area's port: 'pnpm exec next dev -p \$PORT'
+BE_DEPLOY_CMD=''                # single quotes keep \$BRANCH: 'ssh stack "cd api && git fetch && git checkout \$BRANCH && make up"'
+BE_RESET_CMD=""                 # put the shared backend back on FIX_BASE
+CHECK_CMD=""                    # checks every fixer runs; per tracker: CHECK_CMD_app="pnpm exec tsc --noEmit -p ."
+RECHECK_COMMENT_HOST=""         # ssh host whose gh is the account that filed the issues (re-check comments come from it)
+MERGE_CHECK="on"                # when every area is finished: merge all fix branches in a scratch worktree, report order and conflicts
+BOUT_MAX="10"                   # disputes settled by a judge per day; fighters BOUT_FIGHTER_MODEL, judge BOUT_JUDGE_MODEL
+PRODUCT_NAME=""
 NOTIFY_CMD=""                   # optional: run with one message when the stack goes down or comes back
 SQUARE_LANG=""                  # en = the square refuses non-Latin scripts; empty = any language
 CROWD_TITLE=""                  # name shown at the top of the square page (default: the run dir name)
+SQUARE_SERVE="on"               # serve the 3D world and the square over HTTP (square-serve.py; never config or state)
+SQUARE_PORT="8790"              # first port tried
+SQUARE_BIND=""                  # empty = this machine's Tailscale address, else 127.0.0.1; 0.0.0.0 = every network
 EOF
 fi
 echo "crowd run dir ready: $RUN"

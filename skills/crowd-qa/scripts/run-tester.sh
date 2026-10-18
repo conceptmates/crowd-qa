@@ -202,7 +202,7 @@ export AGENT_DEVICE_SESSION="$SESSION" AGENT_BROWSER_SESSION="$SESSION"
 MSG="You were interrupted (an engine or account switch, a quota pause, or a restart). You are still $NAME. Continue where you stopped: keep updating $OUT/report.json and your memory, finish every not_run scenario and the sweep, then give the 2-line summary."
 # resuming a session that another engine continued after it: the session's memory is stale, the files are not
 MSG_HANDOFF="You were interrupted and another tester continued your day in the meantime. You are still $NAME. $OUT/report.json is the current truth (it may have moved past where you remember): read it first, keep every result and evidence path in it, then continue with each not_run scenario and the sweep, keep updating report.json and your memory, and give the 2-line summary."
-limit_hit() { tail -c 4000 "$1" 2>/dev/null | grep -qiE "hit your usage limit|usage limit reached|hit your limit|rate limit exceeded|out of extra usage|quota exceeded"; }
+limit_hit() { tail -c 4000 "$1" 2>/dev/null | grep -qiE "hit your usage limit|usage limit reached|hit your limit|hit your session limit|session limit · resets|rate limit exceeded|out of extra usage|quota exceeded"; }
 # markers older than RETRY_PRIMARY_MIN expire, so the primary engine gets another try after a limit
 expire_marker() { [ -f "$1" ] && [ $(( $(date +%s) - $(mtime "$1") )) -ge $(( ${RETRY_PRIMARY_MIN:-60} * 60 )) ] && rm -f "$1"; }
 

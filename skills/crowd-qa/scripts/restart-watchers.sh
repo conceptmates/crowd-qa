@@ -4,7 +4,8 @@
 #   memlog.sh       memory, swap and load every minute (memlog.txt)
 #   api-watch.sh    stack health every minute; writes STACK_DOWN so testers hold (only when HEALTH_CHECKS is set)
 #   state-saver.sh  state/ on disk every 5 minutes, so any new session can resume the run
-#   square-view.py  the live square page (square/index.html)
+#   square-view.py  the live pages: the 3D world (square/index.html) and the square (square/square.html)
+#   square-serve.py serves those pages over HTTP and prints their URLs (SQUARE_SERVE=off to skip)
 #   tunnel.sh       remote mode only
 #   quota-guard.sh  when CODEX_ACCOUNTS or CLAUDE_ACCOUNTS is set (account rotation through caam)
 #   DEV_CMD         when set and APP_URL does not answer
@@ -27,6 +28,11 @@ fi
 start memlog "memlog.sh $RUN" bash "$RUN/scripts/memlog.sh" "$RUN"
 start state-saver "state-saver.sh $RUN" bash "$RUN/scripts/state-saver.sh" "$RUN"
 start square-page "square-view.py $RUN" python3 "$RUN/scripts/square-view.py" "$RUN" --watch
+if [ "${SQUARE_SERVE:-on}" != off ]; then
+  start square-serve "square-serve.py $RUN" python3 "$RUN/scripts/square-serve.py" "$RUN"
+  for _ in 1 2 3 4 5; do [ -s "$RUN/square/URL" ] && break; sleep 1; done
+  sed 's/^/  live: /' "$RUN/square/URL" 2>/dev/null
+fi
 if [ -n "${HEALTH_CHECKS:-}" ]; then start api-watch "api-watch.sh $RUN" bash "$RUN/scripts/api-watch.sh" "$RUN"
 else echo "api-watch: off (set HEALTH_CHECKS in config.env)"; fi
 if [ -n "${CODEX_ACCOUNTS:-}${CLAUDE_ACCOUNTS:-}" ]; then start quota-guard "quota-guard.sh $RUN" bash "$RUN/scripts/quota-guard.sh" "$RUN"

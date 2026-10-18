@@ -352,7 +352,7 @@ class Planning(unittest.TestCase):
 
 class Filing(unittest.TestCase):
     def test_merge_confirmers_labels_and_github_filing(self):
-        r = Run("file", lanes("maya", "leo"), config='DAYS=1 FILE_CMD="" TRACKERS="app=owner/app"', tester={
+        r = Run("file", lanes("maya", "leo"), config='DAYS=1 FILE_CMD="" TRACKERS="app=owner/app" FILE_AUTO=yes', tester={
             "maya": {"findings": [{"title": "Archive button deletes the whole conversation thread", "route": "/inbox"},
                                   {"title": "REFUSE weird spacing on cards", "route": "/cards"},
                                   {"title": "REPAIR login banner shows twice", "route": "/login"},
@@ -391,6 +391,56 @@ class Filing(unittest.TestCase):
         self.assertEqual([c for c in new if c["kind"] in ("tester", "gh-body")], [])
         self.assertEqual([c["step"] for c in new if c["kind"] == "step"], [], "nothing changed, so no report either")
 
+    def test_the_file_plan_checks_issues_and_comments_and_waits_for_approval(self):
+        r = Run("fileplan", lanes("maya"), config='DAYS=1 FILE_CMD="" TRACKERS="app=owner/app"', tester={"maya": {"findings": [
+            {"title": "Archive button deletes the whole conversation thread"}, {"title": "Search ignores accents in names"},
+            {"title": "Export drops the last row of the file"}, {"title": "Coupon field accepts any length"}]}})
+        snap = [{"number": 41, "title": "Search ignores accents in names", "state": "OPEN", "body": "", "labels": [],
+                 "comments": [], "url": ""},
+                {"number": 12, "title": "Export drops the last row of the file", "state": "CLOSED", "stateReason": "COMPLETED",
+                 "body": "", "labels": [], "comments": [], "url": ""},
+                {"number": 30, "title": "Coupon field length", "state": "CLOSED", "stateReason": "NOT_PLANNED",
+                 "body": "Coupon field accepts any length", "labels": [],
+                 "comments": [{"author": {"login": "dev"}, "createdAt": "2026-10-02", "body": "This is intended."}], "url": ""}]
+        json.dump(snap, open(r.path("snap.json"), "w"))
+        r.env["FAKE_GH_SNAPSHOT"] = r.path("snap.json")
+        r.crowd("run")
+        res = r.crowd("file")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(r.calls(kind="gh-body") + r.calls(kind="gh-comment"), [], "nothing is sent before approval")
+        self.assertIn("nothing sent", r.read("logs", "crowd.log"))
+        md = r.read("file-plan.md")
+        for part in ("New issues", "Comment on an open issue", "Regression of a closed issue", "Skipped", "This is intended."):
+            self.assertIn(part, md)
+        snapshot = json.load(open(r.path("state", "issues-snapshot-app.json")))
+        self.assertEqual(snapshot[2]["comments"][0]["text"], "This is intended.", "comments are part of the snapshot")
+        res = r.crowd("approve")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        filed = json.load(open(r.path("state", "filed.json")))
+        acts = sorted((v["action"], v.get("target")) for v in filed.values())
+        self.assertEqual(acts, [("comment", 41), ("create", None), ("regression", 12)])
+        reg = [c for c in r.calls(kind="gh-body") if c["title"].startswith("Export")][0]
+        self.assertIn("**Regression of #12**", reg["body"])
+        self.assertIn("by #5", reg["body"])
+        self.assertIn("**Also hit by Maya**", r.calls(kind="gh-comment")[0]["body"])
+        refused = json.load(open(r.path("state", "refused.json")))
+        self.assertTrue(any(v["reason"].startswith("skipped: intended (#30)") for v in refused.values()))
+        self.assertEqual(len([c for c in r.calls(kind="step") if c["step"].startswith("file-plan:")]), 1, "one batch call")
+
+    def test_an_approval_covers_only_the_plan_lines_that_existed_when_it_was_given(self):
+        r = Run("approvekeys", lanes("maya"), config='DAYS=1 FILE_CMD="" TRACKERS="app=owner/app"',
+                tester={"maya": {"findings": [{"title": "Archive button deletes the whole conversation thread"}]}})
+        r.crowd("run")
+        r.crowd("file")
+        r.crowd("approve")
+        self.assertEqual(len(json.load(open(r.path("state", "filed.json")))), 1)
+        issues = json.load(open(r.path("state", "issues.json")))
+        issues.append({**issues[0], "title": "Export drops the last row of the file", "key": "later0000001"})
+        json.dump(issues, open(r.path("state", "issues.json"), "w"))
+        r.crowd("file")
+        self.assertEqual(len(json.load(open(r.path("state", "filed.json")))), 1, "a bug planned after approval waits")
+        self.assertIn("1 lines wait for approval", r.read("logs", "crowd.log"))
+
     def test_file_cmd_hook(self):
         r = Run("hook", lanes("maya"), config="DAYS=1", tester={"maya": {"findings": [{"title": "Search ignores accents"}]}})
         r.crowd("run")
@@ -401,6 +451,173 @@ class Filing(unittest.TestCase):
         sent = json.load(open(r.path("hooked", "0.json")))
         self.assertEqual(sent["title"], "Search ignores accents")
         self.assertIn("**Expected**", sent["body"])
+
+
+class Fixing(unittest.TestCase):
+    def repo(self, r):
+        d = r.path("product-repo")
+        os.makedirs(d, exist_ok=True)
+        for c in (["init", "-q", "-b", "main"], ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]):
+            r.sh("git", "-C", d, *c)
+        return d
+
+    def fix_run(self, name, extra=""):
+        r = Run(name, lanes("maya", "leo"), config=f'DAYS=1 FILE_CMD="" TRACKERS="app=owner/app" FILE_AUTO=yes FIXING=on '
+                f'REVIEW_ENGINE=claude {extra}', tester={
+                    "maya": {"findings": [{"title": "Archive button deletes the whole conversation thread", "route": "/inbox"},
+                                          {"title": "Search ignores accents in names", "route": "/search"}]},
+                    "leo": {"findings": []}})
+        with open(r.path("config.env"), "a") as f:
+            f.write(f'REPOS="app={self.repo(r)}"\n')
+        return r
+
+    def roles(self, r):
+        return [c["role"] for c in r.calls(kind="job")]
+
+    def test_cli_runner_fix_review_recheck_and_retry_until_the_reporters_pass_it(self):
+        r = self.fix_run("fixcli", "RUNNER=cli")
+        r.env["FAKE_REVIEW_CHANGES_ONCE"] = "1"
+        r.env["FAKE_RECHECK_FAIL_ONCE"] = "1"
+        res = r.crowd("all", timeout=300)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(self.roles(r), ["fix", "review", "fix", "review", "recheck", "fix", "review", "recheck"])
+        jobs = r.calls(kind="job")
+        wt = r.path("fix", "wt", "inbox-flows")
+        self.assertTrue(all(c["cwd"] == os.path.realpath(wt) or c["cwd"] == wt for c in jobs), "every job runs in the area's worktree")
+        self.assertIn("fix/crowd-test-inbox-flows", r.sh("git", "-C", wt, "branch", "--show-current").stdout)
+        review = [c["prompt"] for c in jobs if c["role"] == "review"]
+        self.assertFalse(any("changed " in p for p in review), "the reviewer never sees the fixer's notes")
+        self.assertIn("no guard", review[1], "the second review checks the first review's comment")
+        recheck = [c["prompt"] for c in jobs if c["role"] == "recheck"]
+        self.assertIn("re-test: open the inbox", recheck[0])
+        self.assertFalse(any("changed " in p for p in recheck))
+        self.assertEqual(len(jobs[5]["keys"]), 1, "only the bug that failed the re-check goes back to the fixer")
+        self.assertIn("still deletes", jobs[5]["prompt"])
+        areas = json.load(open(r.path("state", "areas-detail.json")))
+        self.assertEqual(areas["inbox-flows"]["status"], "done")
+        self.assertEqual(set(areas["inbox-flows"]["verdicts"].values()), {"PASS"})
+        body = r.calls(kind="gh-pr-edit")[-1]["body"]
+        for part in ("| issue | reporter | re-check | note |", "### Fixes #", "Reported by **maya**", "**Cause:** src/app.js:10",
+                     "-before.png", "-after.png", "-recheck.png", "**Re-check by maya: PASS.**", "<summary>Checks",
+                     "<summary>Review</summary>", "no guard", "Generated with [Claude Code]"):
+            self.assertIn(part, body)
+        prs = json.load(open(r.path("state", "prs.json")))
+        self.assertEqual(prs["inbox-flows"]["recheck"], {"pass": 2, "partial": 0, "fail": 0})
+        self.assertIn("## Fix pull requests", r.read("state", "report-pack.md"))
+        self.assertIn("fix areas: inbox-flows=done", r.crowd("status").stdout)
+
+    def test_a_disputed_review_comment_goes_to_a_bout_and_the_loser_drops_it(self):
+        r = self.fix_run("fixbout", "RUNNER=cli")
+        r.env.update(FAKE_REVIEW_CHANGES_ONCE="1", FAKE_REBUT="1", FAKE_BOUT_WINNER="b")
+        res = r.crowd("all", timeout=300)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        bouts = [json.load(open(p)) for p in glob.glob(r.path("state", "bouts", "review-*.json"))]
+        self.assertEqual(len(bouts), 1)
+        self.assertEqual((bouts[0]["winner"], bouts[0]["a"], bouts[0]["b"]), ("b", "reviewer", "fixer"))
+        self.assertEqual(len(bouts[0]["rounds"]), 2, "the given claim and answer, then one more round")
+        review2 = [c["prompt"] for c in r.calls(kind="job") if c["role"] == "review"][1]
+        self.assertIn("must not be raised again", review2)
+        self.assertIn("Disputes settled by a judge", r.calls(kind="gh-pr-edit")[-1]["body"])
+
+    def test_a_bug_another_character_could_not_reproduce_meets_them_in_a_bout_before_filing(self):
+        r = Run("cantrepro", lanes("maya"), config='DAYS=1 FILE_CMD="" TRACKERS="app=owner/app" FILE_AUTO=yes',
+                tester={"maya": {"findings": [{"title": "Export drops the last row of the file"}]}})
+        r.crowd("run")
+        r.crowd("dedupe")
+        issues = json.load(open(r.path("state", "issues.json")))
+        issues[0]["cant_repro"] = ["**Leo** could not reproduce: the export had every row."]
+        json.dump(issues, open(r.path("state", "issues.json"), "w"))
+        r.env["FAKE_BOUT_WINNER"] = "a"
+        r.crowd("file")
+        self.assertEqual(r.calls(kind="gh-body"), [])
+        self.assertIn("sided with the can't-repro report", json.dumps(json.load(open(r.path("state", "refused.json")))))
+        b = json.load(open(glob.glob(r.path("state", "bouts", "square-*.json"))[0]))
+        self.assertEqual((b["a"], b["b"], b["winner"]), ("can't-repro", "Maya", "a"))
+
+    def test_a_judge_that_gives_no_verdict_decides_nothing(self):
+        r = Run("noverdict", lanes("maya"), config='DAYS=1 FILE_CMD="" TRACKERS="app=owner/app" FILE_AUTO=yes',
+                tester={"maya": {"findings": [{"title": "Export drops the last row of the file"}]}})
+        r.crowd("run")
+        r.crowd("dedupe")
+        issues = json.load(open(r.path("state", "issues.json")))
+        issues[0]["cant_repro"] = ["**Leo** could not reproduce."]
+        json.dump(issues, open(r.path("state", "issues.json"), "w"))
+        r.env["FAKE_BOUT_NO_VERDICT"] = "1"
+        r.crowd("file")
+        self.assertEqual(len(r.calls(kind="gh-body")), 1, "the bug is filed, not thrown out by a failed judge")
+        b = json.load(open(glob.glob(r.path("state", "bouts", "square-*.json"))[0]))
+        self.assertEqual((b["status"], b["winner"]), ("no-verdict", ""))
+
+    def test_reporting_a_job_twice_queues_its_follow_up_once(self):
+        r = self.fix_run("fixtwice", "RUNNER=t3")
+        r.crowd("all", timeout=300)
+        j = json.loads(r.crowd("jobs", "next").stdout)[0]
+        json.dump({"fixed": j["keys"], "branch": j["branch"]}, open(j["result"], "w"))
+        r.crowd("jobs", "done", j["id"])
+        r.crowd("jobs", "done", j["id"])
+        reviews = [k for k in json.load(open(r.path("state", "jobs.json"))) if k.startswith("review-")]
+        self.assertEqual(len(reviews), 1)
+
+    def test_the_merge_check_orders_the_branches_and_names_the_conflict(self):
+        r = self.fix_run("fixmerge", "RUNNER=cli CHECK_CMD=true")
+        r.env.update(FAKE_GROUP_SPLIT="1", FAKE_FIX_COMMIT="1")
+        res = r.crowd("all", timeout=400)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        mc = json.load(open(r.path("state", "merge-check.json")))["app"]
+        self.assertEqual(mc["order"], ["area-0"])
+        self.assertEqual(mc["conflicts"], [{"area": "area-1", "files": ["shared.txt"]}])
+        self.assertTrue(mc["checks"]["ok"])
+        self.assertIn("Do not merge cleanly", r.read("merge-check.md"))
+        bodies = {c["body"].split("area **")[1].split("**")[0]: c["body"] for c in r.calls(kind="gh-pr-edit")}
+        self.assertIn("**Merge order:** 1 of 1, first", bodies["area-0"])
+        self.assertIn("**Merge conflict:**", bodies["area-1"])
+        self.assertIn("shared.txt", bodies["area-1"])
+        self.assertFalse(os.path.exists(r.path("fix", "merge-check", "app")), "the scratch worktree is removed")
+
+    def test_retries_run_out_and_the_pr_is_labelled_needs_human(self):
+        r = self.fix_run("fixhuman", "RUNNER=cli FIX_RETRIES=0")
+        r.env["FAKE_RECHECK_FAIL_ONCE"] = "1"
+        r.crowd("all", timeout=300)
+        self.assertEqual(json.load(open(r.path("state", "areas-detail.json")))["inbox-flows"]["status"], "needs-human")
+        self.assertTrue([c for c in r.calls(kind="gh") if c["args"][:2] == ["pr", "edit"] and "needs-human" in c["args"]])
+
+    def test_t3_runner_jobs_are_launched_by_the_session_and_reviews_reuse_the_fixers_worktree(self):
+        r = self.fix_run("fixt3", "RUNNER=t3")
+        res = r.crowd("all", timeout=300)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(r.calls(kind="job"), [], "crowd.py starts no agent itself")
+        self.assertIn("jobs ready for the t3 runner", r.read("logs", "crowd.log"))
+        nxt = json.loads(r.crowd("jobs", "next").stdout)
+        self.assertEqual([(j["role"], j["launch"]) for j in nxt], [("fix", "new-worktree")])
+        self.assertIn("# Fix brief", nxt[0]["prompt_text"])
+        self.assertIn("the worktree this thread started in", nxt[0]["prompt_text"])
+        self.assertEqual(json.loads(r.crowd("jobs", "next").stdout), [], "a claimed job is not handed out twice")
+        wt = r.path("t3-worktree")
+        os.makedirs(wt)
+        r.crowd("jobs", "start", nxt[0]["id"], "--runner", "t3", "--model", "claude-team3:claude-opus-5-5",
+                "--thread", "T-1", "--worktree", wt)
+        json.dump({"fixed": nxt[0]["keys"], "branch": nxt[0]["branch"], "pr": "https://github.com/owner/app/pull/9",
+                   "worktree": wt}, open(nxt[0]["result"], "w"))
+        done = json.loads(r.crowd("jobs", "done", nxt[0]["id"]).stdout)
+        self.assertEqual(done["ready"], 1)
+        rev = json.loads(r.crowd("jobs", "next").stdout)[0]
+        self.assertEqual((rev["role"], rev["launch"], rev["worktree"]), ("review", "existing-worktree", wt))
+        self.assertIn(wt, rev["prompt_text"])
+        r.crowd("jobs", "start", rev["id"], "--thread", "T-2")
+        self.assertIn("1 jobs queued again", r.crowd("jobs", "requeue-running").stdout, "a session that died leaves the job to rerun")
+        jobs = json.load(open(r.path("state", "jobs.json")))
+        self.assertEqual(jobs[nxt[0]["id"]]["model"], "claude-team3:claude-opus-5-5")
+        self.assertIn("T-1", r.crowd("jobs", "list").stdout)
+
+    def test_a_job_without_a_valid_result_is_tried_again_then_left_to_a_person(self):
+        r = self.fix_run("fixbad", "RUNNER=t3")
+        r.crowd("all", timeout=300)
+        j = json.loads(r.crowd("jobs", "next").stdout)[0]
+        r.crowd("jobs", "done", j["id"])
+        self.assertEqual(json.load(open(r.path("state", "jobs.json")))[j["id"]]["status"], "queued")
+        r.crowd("jobs", "done", j["id"])
+        self.assertEqual(json.load(open(r.path("state", "jobs.json")))[j["id"]]["status"], "failed")
+        self.assertEqual(json.load(open(r.path("state", "areas-detail.json")))["inbox-flows"]["status"], "needs-human")
 
 
 class EdgeCases(unittest.TestCase):
@@ -439,19 +656,20 @@ class EdgeCases(unittest.TestCase):
         self.assertEqual(len(r.verdict("maya", 1)["verified_findings"]), 1)
 
     def test_a_filing_error_is_retried_and_an_existing_title_is_not_filed_twice(self):
-        r = Run("fileerr", lanes("maya"), config='DAYS=1 FILE_CMD="" TRACKERS="app=owner/app"', tester={"maya": {"findings": [
+        r = Run("fileerr", lanes("maya"), config='DAYS=1 FILE_CMD="" TRACKERS="app=owner/app" FILE_AUTO=yes', tester={"maya": {"findings": [
             {"title": "Archive button deletes the whole conversation thread"}, {"title": "Search ignores accents in names"}]}})
         r.env["FAKE_GH_FAIL_ONCE"] = "1"
         r.env["FAKE_GH_EXISTING"] = "Search ignores accents in names"
         r.crowd("all")
         filed = json.load(open(r.path("state", "filed.json")))
         self.assertEqual(json.load(open(r.path("state", "refused.json"))), {}, "a filing error is not a refusal")
-        self.assertIn("https://github.com/owner/app/issues/77", [v["url"] for v in filed.values()])
+        self.assertIn("https://github.com/owner/app/issues/77", [v["issue"] for v in filed.values()])
         self.assertEqual(len(filed), 1)
         r.crowd("file")
         filed = json.load(open(r.path("state", "filed.json")))
         self.assertEqual(len(filed), 2)
         self.assertEqual([c["title"] for c in r.calls(kind="gh-body")], ["Archive button deletes the whole conversation thread"])
+        self.assertEqual([c["target"] for c in r.calls(kind="gh-comment")], ["77"], "the open issue gets a comment instead")
 
     def test_status_counts_claude_tester_sessions(self):
         r = Run("status", lanes("maya"), config="DAYS=1")
@@ -756,6 +974,114 @@ class Makeup(unittest.TestCase):
                              capture_output=True, text=True, timeout=180)
         self.assertEqual(res.returncode, 0, res.stdout)
         self.assertEqual(json.load(open(os.path.join(new, "lanes", "maya", "round1", "verdict.json")))["scenarios"]["ran"], ["S1", "S2"])
+
+
+class SquareView(unittest.TestCase):
+    """square-view.py: state.json for the 3D world, index.html (world) and square.html (2D) from one pass."""
+
+    SHAPE = {"run": {"name", "date", "days", "stage", "updated"},
+             "characters": {"id", "name", "role", "surface", "status", "day", "done", "total", "bugs", "color", "shot"},
+             "posts": {"id", "author", "kind", "text", "ts", "parent", "shot"},
+             "bugs": {"key", "title", "severity", "reporter", "confirmers", "state", "url", "area"},
+             "jobs": {"id", "role", "area", "status", "runner", "model", "thread", "persona", "started"},
+             "bouts": {"id", "kind", "a", "b", "subject", "rounds", "winner", "scores", "status"},
+             "prs": {"area", "url", "number", "status", "bugs", "recheck"}}
+
+    def render(self, r):
+        res = subprocess.run(["python3", os.path.join(SKILL, "scripts", "square-view.py"), r.dir], capture_output=True, text=True, timeout=60)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return json.load(open(r.path("square", "state.json")))
+
+    def assertShape(self, st):
+        self.assertEqual(set(st), set(self.SHAPE))
+        self.assertTrue(self.SHAPE["run"] <= set(st["run"]))
+        for k, keys in self.SHAPE.items():
+            for item in ([] if k == "run" else st[k]):
+                self.assertTrue(keys <= set(item), f"{k}: missing {keys - set(item)}")
+
+    def test_state_json_from_every_pipeline_source(self):
+        r = Run("squareview", lanes("maya", "leo", "ana", "bo", "cy"), config="DAYS=2")
+        S = r.path("state")
+
+        def put(rel, obj):
+            os.makedirs(os.path.dirname(r.path(*rel.split("/"))), exist_ok=True)
+            with open(r.path(*rel.split("/")), "w") as f:
+                f.write(obj if isinstance(obj, str) else json.dumps(obj))
+        for lane, st in (("maya", "running"), ("bo", "waiting-stack"), ("cy", "waiting")):
+            put(f"lanes/{lane}/round1/report.json", {"scenarios": [{"id": "S1", "status": "pass"}]})
+            put(f"lanes/{lane}/state.json", {"status": st, "surface": "web"})
+        put("lanes/maya/round1/shots/S1.png", "png")
+        for lane in ("leo", "ana"):
+            put(f"lanes/{lane}/round1/report.json", {"scenarios": [{"id": "S1", "status": "pass"}]})
+            put(f"lanes/{lane}/round1/DONE", "exit=0 engine=claude\n")
+            put(f"lanes/{lane}/state.json", {"status": "done"})
+        put("lanes/ana/round1/verdict.json", {"verified_findings": [{"title": "Pay button double charges"}]})
+        with open(r.path("square", "feed.jsonl"), "w") as f:
+            for e in ({"id": "P1", "author": "maya", "kind": "post", "text": "Checkout hangs", "ts": "2026-10-18T10:00:00",
+                       "shot": r.path("lanes", "maya", "round1", "shots", "S1.png")},
+                      {"id": "P2", "author": "leo", "kind": "me-too", "ref": "P1", "text": "Same", "ts": "2026-10-18T10:05:00"},
+                      {"id": "P3", "author": "ana", "kind": "cant-repro", "ref": "P1", "text": "Works for me", "ts": "2026-10-18T10:06:00"}):
+                f.write(json.dumps(e) + "\n")
+            f.write("not json\n")
+        put("state/issues.json", [{"key": "k1", "title": "Pay button double charges", "severity": "high", "reporter": "ana",
+                                   "confirmers": [{"id": "maya"}, {"id": "S3"}]},
+                                  {"key": "k2", "title": "Avatar upload spins", "severity": "low", "reporter": "maya", "confirmers": []},
+                                  {"key": "k3", "title": "Stack fault", "severity": "low", "reporter": "leo", "confirmers": []}])
+        put("state/filed.json", {"k1": {"url": "https://github.com/o/a/issues/1", "title": "Pay button double charges"}})
+        put("state/file-plan.json", [{"key": "k1", "action": "create"}, {"key": "k2", "action": "comment", "target": "#4"},
+                                     {"key": "k3", "action": "skip", "reason": "stack"}])
+        put("state/areas.json", {"payments": ["k1"], "profile": ["k2"]})
+        put("state/jobs.json", {
+            "fix-payments": {"role": "fix", "area": "payments", "status": "done", "runner": "t3", "model": "opus", "thread": "thr_1"},
+            "review-payments": {"role": "review", "area": "payments", "status": "done", "runner": "cli", "model": "codex"},
+            "recheck-ana": {"role": "recheck", "area": "payments", "status": "running", "runner": "subagent", "persona": "ana"},
+            "recheck-cy": {"role": "recheck", "area": "profile", "status": "done", "persona": "cy", "result": {"verdict": "PASS"}}})
+        put("state/bouts/b1.json", {"id": "b1", "kind": "disagree", "a": "ana", "b": "maya", "subject": "P3",
+                                    "rounds": [{"by": "ana", "text": "Cannot reproduce", "severity": "medium"}], "winner": "maya",
+                                    "scores": {"ana": 4, "maya": 7}, "status": "decided"})
+        put("state/bouts/broken.json", "[1, 2]")
+        put("state/prs.json", {"payments": {"url": "https://github.com/o/a/pull/9", "number": 9, "status": "draft", "bugs": ["k1"],
+                                            "recheck": {"pass": 1, "partial": 0, "fail": 0}},
+                               "profile": {"url": "", "number": "", "status": "open", "bugs": ["k2"]}})
+        st = self.render(r)
+        self.assertShape(st)
+        self.assertEqual(st["run"]["stage"], "recheck", "a recheck job is running")
+        self.assertEqual(st["run"]["days"], 2)
+        status = {c["id"]: c["status"] for c in st["characters"]}
+        self.assertEqual(status, {"maya": "testing", "leo": "judged", "ana": "rechecking", "bo": "blocked", "cy": "waiting"})
+        self.assertEqual(len({c["color"] for c in st["characters"]}), 5, "every character gets its own colour")
+        maya = [c for c in st["characters"] if c["id"] == "maya"][0]
+        self.assertEqual(maya["shot"], "../lanes/maya/round1/shots/S1.png")
+        self.assertEqual([(p["kind"], p["parent"]) for p in st["posts"]], [("post", ""), ("metoo", "P1"), ("cantrepro", "P1")])
+        bugs = {b["key"]: b for b in st["bugs"]}
+        self.assertEqual(bugs["k1"]["state"], "in-pr")
+        self.assertEqual(bugs["k1"]["url"], "https://github.com/o/a/issues/1")
+        self.assertEqual(bugs["k1"]["area"], "payments")
+        self.assertEqual(bugs["k1"]["confirmers"], ["maya"], "scenario ids are not characters")
+        self.assertEqual(bugs["k3"]["state"], "skipped")
+        self.assertEqual({b["id"] for b in st["bouts"]}, {"b1"}, "a malformed bout file is skipped")
+        self.assertEqual(st["bouts"][0]["rounds"][0]["by"], "ana")
+        prs = {p["area"]: p for p in st["prs"]}
+        self.assertEqual(prs["payments"]["recheck"], {"pass": 1, "partial": 0, "fail": 0})
+        self.assertEqual(prs["profile"]["recheck"], {"pass": 1, "partial": 0, "fail": 0}, "counted from finished recheck jobs")
+        index = r.read("square", "index.html")
+        self.assertIn('"three"', index)
+        self.assertIn('id="state"', index, "state is inlined for file://")
+        self.assertNotIn('src="world.js"', index, "world.js is inlined: browsers refuse module files from file://")
+        self.assertIn("square.html", index)
+        for f in ("square.html", "state.js", "square-data.js"):
+            self.assertTrue(os.path.exists(r.path("square", f)), f)
+        self.assertIn('"Checkout hangs"', r.read("square", "square-data.js"), "the 2D page polls this in place")
+
+    def test_a_fresh_run_gives_empty_lists_not_a_crash(self):
+        r = Run("squareview-empty", lanes("maya"), plans=False)
+        os.remove(r.path("square", "feed.jsonl"))
+        st = self.render(r)
+        self.assertShape(st)
+        self.assertEqual(st["run"]["stage"], "plan")
+        self.assertEqual([st[k] for k in ("posts", "bugs", "jobs", "bouts", "prs")], [[], [], [], [], []])
+        self.assertEqual(st["characters"][0]["status"], "waiting")
+        self.assertTrue(os.path.exists(r.path("square", "square.html")))
 
 
 if __name__ == "__main__":
