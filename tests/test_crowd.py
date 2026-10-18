@@ -609,6 +609,18 @@ class Fixing(unittest.TestCase):
         self.assertEqual(jobs[nxt[0]["id"]]["model"], "claude-team3:claude-opus-5-5")
         self.assertIn("T-1", r.crowd("jobs", "list").stdout)
 
+    def test_a_mobile_area_gets_a_device_and_a_build_never_a_browser(self):
+        r = self.fix_run("fixmobile", 'RUNNER=t3 TRACKER_KIND="app=mobile"')
+        res = r.crowd("all", timeout=300)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        brief = json.loads(r.crowd("jobs", "next").stdout)[0]["prompt_text"]
+        self.assertIn("fix-device.sh", brief)
+        self.assertIn("never run it in a browser or build it for web", brief)
+        self.assertIn("## Device", brief)
+        self.assertNotIn("fix-browser.sh", brief)
+        self.assertNotIn("fix-stack.sh", brief)
+        self.assertNotIn("{{", brief)
+
     def test_a_job_without_a_valid_result_is_tried_again_then_left_to_a_person(self):
         r = self.fix_run("fixbad", "RUNNER=t3")
         r.crowd("all", timeout=300)
@@ -974,6 +986,39 @@ class Makeup(unittest.TestCase):
                              capture_output=True, text=True, timeout=180)
         self.assertEqual(res.returncode, 0, res.stdout)
         self.assertEqual(json.load(open(os.path.join(new, "lanes", "maya", "round1", "verdict.json")))["scenarios"]["ran"], ["S1", "S2"])
+
+    def test_makeup_gives_each_character_its_own_day_count_and_keeps_the_tools(self):
+        """2026-10-19: DAYS=2 for the run made plan_ok re-plan every one-day character in full, and the run dir had
+        no tools/ (device shims, act-as helpers), so every remote device was 'gone'."""
+        r = Run("makeup-days", lanes("maya", "ann"), config="SCEN_MAX=2")
+        for lane, d, statuses in (
+                ("maya", 1, {"S1": ("not_run", ""), "S2": ("not_run", ""), "S3": ("not_run", "")}),
+                ("maya", 2, {f"S{i}": ("pass", "") for i in (4, 5, 6)}),
+                ("ann", 1, {"S1": ("blocked", "simulator gone"), "S2": ("pass", ""), "S3": ("pass", "")}),
+                ("ann", 2, {f"S{i}": ("pass", "") for i in (4, 5, 6)})):
+            os.makedirs(r.path("lanes", lane, f"round{d}"), exist_ok=True)
+            json.dump({"scenarios": [{"id": k, "status": v[0], "notes": v[1]} for k, v in statuses.items()]},
+                      open(r.path("lanes", lane, f"round{d}", "report.json"), "w"))
+        os.makedirs(r.path("tools", "bin"), exist_ok=True)
+        open(r.path("tools", "bin", "xcrun"), "w").write("#!/bin/sh\n")
+        new = os.path.join(WORK, "makeup-days-new")
+        shutil.rmtree(new, ignore_errors=True)
+        res = r.crowd("makeup", new)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertTrue(os.path.exists(os.path.join(new, "tools", "bin", "xcrun")))
+        self.assertEqual(open(os.path.join(new, "lanes", "maya", "days")).read().strip(), "2")
+        self.assertEqual(open(os.path.join(new, "lanes", "ann", "days")).read().strip(), "1")
+        ann = os.path.join(new, "lanes", "ann", "scenarios.md")
+        before = open(ann).read()
+        env = {**r.env, "FAKE_LOG": os.path.join(new, "fake.jsonl")}
+        shutil.copy(r.path("fake-tester.json"), os.path.join(new, "fake-tester.json"))
+        res = subprocess.run(["python3", os.path.join(new, "scripts", "crowd.py"), new, "run"], env=env,
+                             capture_output=True, text=True, timeout=180)
+        self.assertEqual(res.returncode, 0, res.stdout)
+        self.assertEqual(open(ann).read(), before, "a one-day character is planned, not re-planned")
+        self.assertTrue(os.path.exists(os.path.join(new, "lanes", "ann", "round1", "verdict.json")))
+        self.assertFalse(os.path.exists(os.path.join(new, "lanes", "ann", "round2")))
+        self.assertTrue(os.path.exists(os.path.join(new, "lanes", "maya", "round2", "verdict.json")))
 
 
 class SquareView(unittest.TestCase):

@@ -192,6 +192,7 @@ nobody could test, and the spend from `crowd.py status`. Quote only URLs the tra
 - `scripts/crowd.py`: the run loop (plan, run, judge, dedupe, file plan, file, fix jobs, bouts, PR bodies,
   report, status)
 - `scripts/fix-stack.sh` (a dev server per area, the backend queue), `scripts/fix-browser.sh` (a browser per job),
+  `scripts/fix-device.sh` (a simulator or emulator per job, and a build of the fix branch for mobile areas),
   `scripts/evidence.sh` (evidence pushes that never overwrite each other)
 - `scripts/run-tester.sh`: one character-day on any surface; per-character engine, lean Claude sessions in
   budget chunks, stack probe before start, per-engine quota pauses, browser slots

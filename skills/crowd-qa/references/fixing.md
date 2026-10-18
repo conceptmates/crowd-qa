@@ -95,3 +95,14 @@ the commits already pushed.
 - `BE_DEPLOY_CMD` (single quotes, `$BRANCH`) and `BE_RESET_CMD` for backend areas.
 - `CHECK_CMD` or `CHECK_CMD_<tracker>`: the checks every fixer must pass.
 - Browsers come from the crowd's slot pool (`BROWSER_SLOTS`); keep one slot per parallel job.
+
+### A mobile product
+Set `TRACKER_KIND="app=mobile backend=be"` and `FIX_DRIVER=device`. A mobile area has no dev server: the fixer
+claims a device with the base build on it for 'before', and `fix-device.sh build` copies the checkout to
+`FIX_BUILD_HOST`, runs `FIX_BUILD_CMD_ios` (or `_android`), carries the build to the device's host
+(`DEVICE_HOSTS`) and installs it. Release puts `APP_PATH` / `ANDROID_APP_PATH` back, so the next job starts from
+the base build. With `FIX_DRIVER=device` backend areas and every re-check drive a device instead of a browser.
+Give the fix stage the devices the testers used only after the last character-day (`FIX_DEVICES`, default
+`DEVICE_POOL`), and never build a mobile app for web to get a browser. `FIX_STACK_NOTE_<kind>` replaces the
+generated "Running the product" text for that kind when a product needs its own (`{RUN}`, `{SCRIPTS}`, `{JOB}`,
+`{PORT}` are filled in).

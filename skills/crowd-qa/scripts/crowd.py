@@ -216,13 +216,14 @@ def day_scenarios(cid, d):
 
 
 def plan_ok(cid):
-    return all(day_scenarios(cid, d) for d in range(1, DAYS + 1))
+    return all(day_scenarios(cid, d) for d in range(1, ndays(cid) + 1))
 
 
 def ndays(cid):
-    """Days this character runs: DAYS, or more when split_days split a long day (lanes/<id>/days holds the count)."""
+    """Days this character runs: DAYS, unless lanes/<id>/days holds a count. split_days writes more when it splits a
+    long day; makeup.py writes fewer for a character whose missed scenarios fit in fewer days than the longest one."""
     try:
-        return max(DAYS, int(read(os.path.join(lane_dir(cid), "days")).strip()))
+        return int(read(os.path.join(lane_dir(cid), "days")).strip())
     except ValueError:
         return DAYS
 
@@ -1298,7 +1299,33 @@ def stack_note(area, a, job):
           f"`bash {SCRIPTS}/fix-stack.sh {RUN} be-take {job} {a['branch']}` deploys it (it waits while another fix holds the "
           f"backend). Use the product at {app}. Always give it back when you are done, even after a failure: "
           f"`bash {SCRIPTS}/fix-stack.sh {RUN} be-give {job}`. Take 'before' screenshots at {app} before be-take.")
-    return {"fe": fe, "be": be, "both": fe + "\n\n" + be}[a.get("kind", "fe")]
+    mob = (f"This is a mobile app: never run it in a browser or build it for web. Before you change anything, take a "
+           f"device: `eval \"$(bash {SCRIPTS}/fix-device.sh {RUN} claim {job})\"` sets DEVICE (a simulator or emulator "
+           f"with the base build installed); take 'before' screenshots on it. Commit, then "
+           f"`bash {SCRIPTS}/fix-device.sh {RUN} build {job} <your checkout>` builds your checkout and installs it on "
+           f"DEVICE (minutes; run it again after each change). It runs against the shared backend. Release the device "
+           f"at the end, even after a failure: `bash {SCRIPTS}/fix-device.sh {RUN} release {job}`.")
+    kind = a.get("kind", "fe")
+    own = cfg(f"FIX_STACK_NOTE_{kind}")
+    if own:
+        return own.replace("{RUN}", RUN).replace("{SCRIPTS}", SCRIPTS).replace("{JOB}", job).replace("{PORT}", str(port))
+    return {"fe": fe, "be": be, "both": fe + "\n\n" + be, "mobile": mob}[kind]
+
+
+def driver_note(job, kind):
+    """How the job sees the product: a browser from the crowd's slots, or (FIX_DRIVER=device) a device from
+    fix-device.sh. Mobile areas always use a device."""
+    if kind == "mobile" or cfg("FIX_DRIVER", "browser") == "device":
+        return ("Device", f"Drive the app with agent-device on the DEVICE that `fix-device.sh claim` gave you "
+                f"(`eval \"$(bash {SCRIPTS}/fix-device.sh {RUN} claim {job})\"`; run it again in a new shell, it returns "
+                f"the same device). Pass `--udid $DEVICE` (iOS) or `--serial $DEVICE` (Android) on every call; never boot, "
+                f"erase or shut down a device. Release it at the end: `bash {SCRIPTS}/fix-device.sh {RUN} release {job}`.")
+    return ("Browser", f"Take your own browser: `eval \"$(bash {SCRIPTS}/fix-browser.sh {RUN} acquire {job})\"`. It sets "
+            f"`AGENT_BROWSER_SESSION` (and `AGENT_BROWSER_CDP` for a remote slot) in your shell; run that line again in "
+            f"any new shell. Use agent-browser as usual. Never run `agent-browser close --all` or `connect`, never use "
+            f"another session. Before you save a screenshot, check the page URL (`agent-browser get url`) is your app on "
+            f"your port: a screenshot of somebody else's page is worse than none. Release it at the end: "
+            f"`bash {SCRIPTS}/fix-browser.sh {RUN} release {job}`.")
 
 
 def bug_lines(a, bugs, keys, retest=None):
@@ -1347,11 +1374,13 @@ def new_job(role, area, feedback="", keys=None):
             "FEEDBACK": feedback, "RUN": RUN, "JOB": jid, "TRACKER": a["tracker"], "RESULT": os.path.join(d, "result.json"),
             "EVIDENCE_DIR": os.path.join(d, "evidence"), "PR": a.get("pr") or "(not open yet)",
             "STACK_NOTE": stack_note(area, a, jid), "COMMENT_HOW": how,
+            "DRIVER_TITLE": driver_note(jid, a["kind"])[0], "DRIVER_NOTE": driver_note(jid, a["kind"])[1],
             "CHECK_CMD": cfg(f"CHECK_CMD_{a['tracker']}", cfg("CHECK_CMD", "the repo's own type check, lint and tests")),
             "COAUTHOR": cfg("COAUTHOR", "Claude Opus 5.5 <noreply@anthropic.com>"),
             "SCOPE_RULE": {"fe": "Frontend only: never change or open PRs on another repo.",
                            "be": "Backend only: never change or open PRs on another repo.",
-                           "both": "Change only this repo."}[a["kind"]]}
+                           "both": "Change only this repo.",
+                           "mobile": "App only: never change or open PRs on another repo."}[a["kind"]]}
     os.makedirs(vals["EVIDENCE_DIR"], exist_ok=True)
     text = read(os.path.join(RUN, "templates", f"{role}-brief.md"))
     for k, v in vals.items():

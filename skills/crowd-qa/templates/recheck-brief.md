@@ -18,10 +18,8 @@ phone user gets viewport 390 844, a keyboard user never clicks.
 ## Running the product
 {{STACK_NOTE}}
 
-## Browser
-`eval "$(bash {{RUN}}/scripts/fix-browser.sh {{RUN}} acquire {{JOB}})"`, then agent-browser as usual. Never
-`close --all` or `connect`. Check the page URL is the fix branch on your port before every screenshot. Release with
-`bash {{RUN}}/scripts/fix-browser.sh {{RUN}} release {{JOB}}`.
+## {{DRIVER_TITLE}}
+{{DRIVER_NOTE}}
 
 ## For every bug
 1. As the reporter, repeat the issue's steps on the fix branch, then one nearby variation they would try (other
@@ -40,7 +38,7 @@ phone user gets viewport 390 844, a keyboard user never clicks.
    Do not close issues; the PR closes them on merge.
 
 ## When done
-Release the browser and write `{{RESULT}}`:
+Release the browser or device and write `{{RESULT}}`:
 ```json
 {"results": [{"key": "<crowd key>", "issue": <n>, "persona": "<reporter id>", "verdict": "PASS|PARTIAL|FAIL",
               "note": "<one line>", "shot": "<image url>", "frontend_fixable": true, "comment": "<comment url>"}]}
