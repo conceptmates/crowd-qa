@@ -621,6 +621,24 @@ class Fixing(unittest.TestCase):
         self.assertNotIn("fix-stack.sh", brief)
         self.assertNotIn("{{", brief)
 
+    def test_fix_from_runs_adds_the_issues_an_earlier_run_created(self):
+        old = os.path.join(WORK, "fixfrom-parent")
+        shutil.rmtree(old, ignore_errors=True)
+        os.makedirs(os.path.join(old, "state"))
+        json.dump({"k-old": {"url": "https://github.com/owner/app/issues/41", "title": "COD order shows paid", "tracker": "app"},
+                   "k-dup": {"url": "https://github.com/owner/app/issues/12#issuecomment-1", "title": "Seen again",
+                             "tracker": "app", "action": "comment"}}, open(os.path.join(old, "state", "filed.json"), "w"))
+        json.dump([{"key": "k-old", "reporter": "kareem", "severity": "high"}], open(os.path.join(old, "state", "issues.json"), "w"))
+        r = self.fix_run("fixfrom", f'RUNNER=t3 FIX_FROM_RUNS="{old}"')
+        res = r.crowd("all", timeout=300)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        areas = json.load(open(r.path("state", "areas-detail.json")))
+        keys = [k for a in areas.values() for k in a["bugs"]]
+        self.assertIn("k-old", keys)
+        self.assertNotIn("k-dup", keys, "a comment on someone else's issue is not ours to fix")
+        prompts = " ".join(j["prompt_text"] for j in json.loads(r.crowd("jobs", "next").stdout))
+        self.assertIn(f"filed by an earlier run: issue, card and diary under {old}", prompts)
+
     def test_a_job_without_a_valid_result_is_tried_again_then_left_to_a_person(self):
         r = self.fix_run("fixbad", "RUNNER=t3")
         r.crowd("all", timeout=300)

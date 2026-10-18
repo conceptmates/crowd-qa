@@ -106,3 +106,8 @@ Give the fix stage the devices the testers used only after the last character-da
 `DEVICE_POOL`), and never build a mobile app for web to get a browser. `FIX_STACK_NOTE_<kind>` replaces the
 generated "Running the product" text for that kind when a product needs its own (`{RUN}`, `{SCRIPTS}`, `{JOB}`,
 `{PORT}` are filled in).
+
+### Fixing an earlier run's bugs
+`FIX_FROM_RUNS="<run dir> ..."` adds the issues those runs created (not their comments on other people's issues)
+to this run's fix stage, so a make-up run also fixes what its parent filed. Re-checkers are pointed at the earlier
+run's cards and diaries for those reporters.

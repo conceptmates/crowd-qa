@@ -1230,18 +1230,21 @@ def slug(s):
 
 
 def bug_rows():
-    """Every filed bug the fix stage can work on: {key: {issue number, title, tracker, reporter, confirmers...}}."""
-    issues = {x["key"]: x for x in jload(os.path.join(RUN, "state", "issues.json"), [])}
+    """Every filed bug the fix stage can work on: {key: {issue number, title, tracker, reporter, confirmers...}}.
+    FIX_FROM_RUNS adds the issues earlier runs created (a make-up run fixes its parent's bugs too); this run wins."""
     out = {}
-    for k, v in jload(os.path.join(RUN, "state", "filed.json"), {}).items():
-        num = re.search(r"/issues/(\d+)", v.get("issue") or v.get("url", ""))
-        if not num:
-            continue
-        x = issues.get(k, {})
-        out[k] = {"key": k, "issue": int(num.group(1)), "title": v["title"], "tracker": v.get("tracker", "app"),
-                  "reporter": x.get("reporter") or v.get("reporter", ""), "route": x.get("route", ""),
-                  "severity": x.get("severity") or v.get("severity", ""), "cause": x.get("likely_cause") or x.get("mechanism", ""),
-                  "confirmers": [c.get("id") for c in x.get("confirmers", [])], "action": v.get("action", "create")}
+    for home in [*reversed(cfg("FIX_FROM_RUNS").split()), RUN]:
+        issues = {x["key"]: x for x in jload(os.path.join(home, "state", "issues.json"), [])}
+        for k, v in jload(os.path.join(home, "state", "filed.json"), {}).items():
+            num = re.search(r"/issues/(\d+)", v.get("issue") or v.get("url", ""))
+            if not num or (home != RUN and v.get("action", "create") not in ("create", "regression")):
+                continue
+            x = issues.get(k, {})
+            out[k] = {"key": k, "issue": int(num.group(1)), "title": v["title"], "tracker": v.get("tracker", "app"),
+                      "reporter": x.get("reporter") or v.get("reporter", ""), "route": x.get("route", ""),
+                      "severity": x.get("severity") or v.get("severity", ""), "cause": x.get("likely_cause") or x.get("mechanism", ""),
+                      "confirmers": [c.get("id") for c in x.get("confirmers", [])], "action": v.get("action", "create"),
+                      "home": home}
     return out
 
 
@@ -1335,7 +1338,9 @@ def bug_lines(a, bugs, keys, retest=None):
         if not b:
             continue
         also = f" (also hit by {', '.join(b['confirmers'])})" if b["confirmers"] else ""
-        out.append(f"  - #{b['issue']} `{k}` reported by **{b['reporter']}**{also}: {b['title']}"
+        home = b.get("home", RUN)
+        where = f" [filed by an earlier run: issue, card and diary under {home}/state and {home}/lanes]" if home != RUN else ""
+        out.append(f"  - #{b['issue']} `{k}` reported by **{b['reporter']}**{also}: {b['title']}{where}"
                    + (f"\n    re-test: {retest[k]}" if retest and retest.get(k) else ""))
     return "\n".join(out)
 
