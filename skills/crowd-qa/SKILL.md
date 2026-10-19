@@ -6,7 +6,8 @@ description: Launch-week crowd QA for a web app, mobile app, CLI or HTTP API. Na
 # crowd-qa
 
 A crowd of characters uses the product the way its real users would, over several simulated days, and you
-file what breaks. Each character is played by a tester agent (Sonnet or Codex). Everything between the model
+file what breaks. Each character is played by a tester agent (Sonnet by default, Codex when asked). Every other model step runs
+on Opus: Sonnet only drives the product's screens. Everything between the model
 calls (scheduling, waiting, retries, coverage, evidence checks, merging, filing) is code in `scripts/crowd.py`,
 which is why a 30-character run costs a few hundred dollars instead of about a thousand (`references/cost.md`).
 
@@ -30,7 +31,7 @@ per call, recommended option first. Ask only what earlier answers have settled.
    cover, offered from what you found (sellers and buyers, hosts and guests, admins and members). Who depends
    on whom. Language for cards and the square (`SQUARE_LANG`).
 3. **Engines.** Ask the question in `references/engines.md`: the main tester (Sonnet medium is recommended),
-   which characters run on Codex (3-5 picked up front), and what happens at a usage limit. Preflight fails until
+   which characters, if any, run on Codex (none by default), and what happens at a usage limit. Preflight fails until
    `ENGINE_CONFIRMED=yes`, so this cannot be skipped by accident. With several subscription accounts, list their
    caam profiles in `CODEX_ACCOUNTS` / `CLAUDE_ACCOUNTS`; `quota-guard.sh` rotates them. From launch on, only the
    guard switches accounts: a switch by hand fails the Opus steps that are running.
@@ -152,7 +153,7 @@ report.
 ## Step 7: Fix (FIXING=on)
 Read `references/fixing.md` first. With the `cli` runner, crowd.py does everything. With `t3` or `subagent`, you
 run the job loop: `crowd.py "$RUN" jobs next`, launch each job as its own T3 thread or subagent (models picked from
-the live catalog: Opus fixes, another provider reviews, Sonnet re-checks, spread over the Claude accounts), then
+the live catalog: Opus fixes, Opus reviews, Sonnet re-checks, spread over the Claude accounts), then
 `jobs start` and `jobs done` as each one finishes, until every area is `done` or `needs-human`. Never put two
 jobs in one context and never pass one agent's transcript to another; the job prompt is all an agent gets.
 
@@ -192,6 +193,7 @@ nobody could test, and the spend from `crowd.py status`. Quote only URLs the tra
 - `scripts/crowd.py`: the run loop (plan, run, judge, dedupe, file plan, file, fix jobs, bouts, PR bodies,
   report, status)
 - `scripts/fix-stack.sh` (a dev server per area, the backend queue), `scripts/fix-browser.sh` (a browser per job),
+  `scripts/fix-device.sh` (a simulator or emulator per job, and a build of the fix branch for mobile areas),
   `scripts/evidence.sh` (evidence pushes that never overwrite each other)
 - `scripts/run-tester.sh`: one character-day on any surface; per-character engine, lean Claude sessions in
   budget chunks, stack probe before start, per-engine quota pauses, browser slots

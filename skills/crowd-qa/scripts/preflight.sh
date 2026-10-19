@@ -165,8 +165,14 @@ if [ "${FIXING:-off}" = on ]; then
     else bad "fix: no local clone for tracker $k in REPOS (\"$k=/path/to/clone\"); cli and subagent runners make worktrees from it"; fi
   done
   kinds=" ${TRACKER_KIND:-} "
-  if [ -z "${FE_DEV_CMD:-}" ] && ! echo "$kinds" | grep -q "=be "; then
+  fe=0; for t in ${TRACKERS:-}; do k="${t%%=*}"; kd=$(echo "$kinds" | grep -o " $k=[a-z]*" | cut -d= -f2)
+    case "${kd:-}" in fe|both) fe=1 ;; be|mobile) ;; *) echo "$k" | grep -qiE "back|api|server" || fe=1 ;; esac; done
+  if [ -z "${FE_DEV_CMD:-}" ] && [ $fe = 1 ]; then
     bad "fix: FE_DEV_CMD is empty: frontend fixes cannot be run for before/after evidence or re-checks"
+  fi
+  if echo "$kinds" | grep -q "=mobile " || [ "${FIX_DRIVER:-browser}" = device ]; then
+    [ -n "${FIX_BUILD_CMD_ios:-}${FIX_BUILD_CMD_android:-}" ] && ok "fix: mobile build command set" \
+      || bad "fix: a mobile area or FIX_DRIVER=device but no FIX_BUILD_CMD_ios / FIX_BUILD_CMD_android"
   fi
   echo "$kinds" | grep -q "=be " && { [ -n "${BE_DEPLOY_CMD:-}" ] && ok "fix: BE_DEPLOY_CMD set" || bad "fix: a backend tracker but BE_DEPLOY_CMD is empty"; }
   [ -n "${CHECK_CMD:-}" ] || set | grep -q '^CHECK_CMD_' || echo "NOTE  fix: no CHECK_CMD; fixers will look for the repo's own checks"

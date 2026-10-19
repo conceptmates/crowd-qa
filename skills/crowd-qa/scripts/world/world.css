@@ -80,3 +80,14 @@ body.sq-open #sq{transform:none}
 .boatlbl{pointer-events:auto;cursor:pointer;background:#fff;border-radius:6px;padding:1px 6px;font-size:10px;font-weight:800;box-shadow:0 1px 3px rgba(0,0,0,.2);white-space:nowrap}
 
 @media (max-width:800px){#hud{max-width:calc(100vw - 24px)}#counters{display:none}#card{width:calc(100vw - 24px)}#sq{width:100vw}body.sq-open #tools{right:12px}}
+.zone.click{pointer-events:auto;cursor:pointer}
+#card .gh{display:flex;gap:8px;padding:8px 2px;border-top:1px solid #ebe7dc;color:inherit;text-decoration:none}
+#card .gh:hover{background:#f6f4ee}
+#card .gh .st{flex:none;width:16px;text-align:center;font-size:13px;line-height:18px}
+#card .gh .st.op{color:#1a7f37}#card .gh .st.pr{color:#8250df}#card .gh .st.cm{color:#57606a}
+#card .gh .body{display:flex;flex-direction:column;gap:2px;min-width:0;font-size:12px}
+#card .gh b{font-weight:700;line-height:1.3}
+#card .gh .meta{color:var(--muted);font-size:11px}
+#card .gh .lb{align-self:flex-start;border-radius:10px;padding:0 7px;font-size:10px;font-weight:700;background:#eef0f6;margin-top:2px}
+#card .gh .lb.blocker,#card .gh .lb.critical{background:#ffebe9;color:#cf222e}#card .gh .lb.major,#card .gh .lb.high{background:#fff1e5;color:#bc4c00}
+#card .gh .lb.pr{background:#fbefff;color:#8250df}

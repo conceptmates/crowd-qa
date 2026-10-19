@@ -35,13 +35,8 @@ character, so a fix that only looks right in the code will come back to you.
 ## Running the product
 {{STACK_NOTE}}
 
-## Browser
-Take your own browser: `eval "$(bash {{RUN}}/scripts/fix-browser.sh {{RUN}} acquire {{JOB}})"`. It sets
-`AGENT_BROWSER_SESSION` (and `AGENT_BROWSER_CDP` for a remote slot) in your shell; run that line again in any new
-shell. Use agent-browser as usual. Never run `agent-browser close --all` or `connect`, never use another session.
-Before you save a screenshot, check the page URL (`agent-browser get url`) is your app on your port: a screenshot
-of somebody else's page is worse than none. Release it at the end: `bash {{RUN}}/scripts/fix-browser.sh {{RUN}}
-release {{JOB}}`.
+## {{DRIVER_TITLE}}
+{{DRIVER_NOTE}}
 
 ## Evidence
 For every bug: `<n>-before.png` on `{{BASE}}` showing the bug and `<n>-after.png` on your branch with the same
@@ -59,7 +54,7 @@ On later attempts, push to the same branch; do not open a second PR. Do not merg
 the reporters do that after their re-test.
 
 ## When done
-Stop your dev server, release your browser, and write `{{RESULT}}`:
+Stop your dev server, release your browser or device, and write `{{RESULT}}`:
 ```json
 {"branch": "{{BRANCH}}", "worktree": "<absolute path of your checkout>", "pr": "<PR URL>",
  "fixed": ["<crowd key>"], "needs_backend": [{"key": "", "why": ""}], "not_changed": [{"key": "", "why": ""}],

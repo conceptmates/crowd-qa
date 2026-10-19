@@ -213,6 +213,13 @@ run_engine() {
     codex)
       # the newest codex session of this day, even if another engine ran in between: resume beats a fresh start
       # (only when a log exists: grep with no file argument would read stdin and block the runner)
+      # codex runs each command in a login zsh, whose dotfiles (fnm, path_helper) put the real agent-device, xcrun
+      # and adb ahead of the run's shims; a ZDOTDIR that sources the user's files and then restores this PATH
+      local Z="$RUN/state/zdot"; mkdir -p "$Z"
+      for f in zshenv zprofile; do
+        printf '[ -f "$HOME/.%s" ] && ZDOTDIR="$HOME" source "$HOME/.%s"\nexport PATH=%q\n' "$f" "$f" "$PATH" > "$Z/.$f"
+      done
+      export ZDOTDIR="$Z"
       SID=""; LOGS=$(ls -t "$OUT"/tester*.log 2>/dev/null)
       [ -n "$LOGS" ] && SID=$(grep -h -m1 '^session id:' $LOGS 2>/dev/null < /dev/null | head -1 | awk '{print $3}')
       if [ -n "$RESUME" ] && [ -n "$SID" ]; then

@@ -141,6 +141,8 @@ def main(argv):
             earlier = f"_Earlier: {status}." + (f" {' '.join(notes.split())[:300]}" if notes else "") + "_"
             out.append(f"{head}\n{earlier}\n{body}\n")
         days = max(days, (len(picked) - 1) // cap + 1)
+        with open(os.path.join(nd, "days"), "w") as f:
+            f.write(f"{(len(picked) - 1) // cap + 1}\n")     # or plan() re-plans every shorter character in full
         with open(os.path.join(nd, "scenarios.md"), "w") as f:
             f.write("".join(out))
     ids = set(plans)
@@ -150,7 +152,7 @@ def main(argv):
     for f in ("filed.txt", "context.md", "product-map.md", "product-map.md.src", "stack-faults.md"):
         if os.path.exists(os.path.join(old, f)):
             shutil.copy(os.path.join(old, f), os.path.join(new, f))
-    for d in ("world", "stack"):
+    for d in ("world", "stack", "tools"):     # tools: act-as helpers and device shims the scenarios call
         if os.path.isdir(os.path.join(old, d)):
             shutil.copytree(os.path.join(old, d), os.path.join(new, d), dirs_exist_ok=True)
     conf = read(os.path.join(old, "config.env"))
