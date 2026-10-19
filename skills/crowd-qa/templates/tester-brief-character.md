@@ -26,8 +26,10 @@ made, and what annoyed you.
   use what it prints. Never `close --all`.
   A weak network, when your card asks for one: `agent-browser offline on`, wait 5-20 s, `agent-browser offline off`.
 - **ios / android**: your own device `$DEVICE`, app `$APP_ID` (installed; on day 1 a fresh install). Use the
-  `agent-device` CLI (installed globally; never `npx -y agent-device`, which costs 1.4 s per call), the session
-  is already set. Start with `agent-device open $APP_ID --udid $DEVICE --foreground`. Prefer `@refs` and labels
+  `agent-device` CLI (installed globally; never `npx -y agent-device`, which costs 1.4 s per call), pass
+  `--session $AGENT_DEVICE_SESSION` on every call (the variable alone is not read: without the flag every tester
+  shares one session and drives whichever device it holds). Start with
+  `agent-device open $APP_ID --udid $DEVICE --session $AGENT_DEVICE_SESSION --foreground`. Prefer `@refs` and labels
   over coordinates. Never touch another device: other people are using them right now.
 - **cli**: the product's command-line tool (Run context says how to run it). Work in `$OUT/work`. Save every
   flow's terminal session (command, output, exit code) to `$OUT/evidence/<scenario-id>.txt`.

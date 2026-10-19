@@ -1325,8 +1325,10 @@ def driver_note(job, kind):
     if kind == "mobile" or cfg("FIX_DRIVER", "browser") == "device":
         return ("Device", f"Drive the app with agent-device on the DEVICE that `fix-device.sh claim` gave you "
                 f"(`eval \"$(bash {SCRIPTS}/fix-device.sh {RUN} claim {job})\"`; run it again in a new shell, it returns "
-                f"the same device). Pass `--udid $DEVICE` (iOS) or `--serial $DEVICE` (Android) on every call; never boot, "
-                f"erase or shut down a device. Release it at the end: `bash {SCRIPTS}/fix-device.sh {RUN} release {job}`.")
+                f"the same device). Pass `--session \"$AGENT_DEVICE_SESSION\"` on every call and `--udid $DEVICE` (iOS) or "
+                f"`--serial $DEVICE` (Android) on `open`: without --session every job shares one session and drives "
+                f"whichever device it holds. If a command says another session holds the device, never close or take "
+                f"over that session; wait, or report it. Never boot, erase or shut down a device. Release it at the end: `bash {SCRIPTS}/fix-device.sh {RUN} release {job}`.")
     return ("Browser", f"Take your own browser: `eval \"$(bash {SCRIPTS}/fix-browser.sh {RUN} acquire {job})\"`. It sets "
             f"`AGENT_BROWSER_SESSION` (and `AGENT_BROWSER_CDP` for a remote slot) in your shell; run that line again in "
             f"any new shell. Use agent-browser as usual. Never run `agent-browser close --all` or `connect`, never use "

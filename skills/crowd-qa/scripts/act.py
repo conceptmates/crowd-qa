@@ -16,9 +16,9 @@ in ONE `agent-device batch` request; after a tap the screen is read again before
 miss or a tie it stops and prints the candidates so the tester can pass a ref instead.
 
 Ends by printing the screen's interactive elements (unless --quiet), so no extra snapshot call is needed.
-Session and device come from the environment (AGENT_DEVICE_SESSION), as for agent-device itself.
+Session and device come from the environment (AGENT_DEVICE_SESSION); act.py passes it as --session.
 """
-import json, re, subprocess, sys
+import json, os, re, subprocess, sys
 
 AD = "agent-device"
 LINE = re.compile(r'^\s*[-+=]?\s*(@e\d+(?:~s\d+)?)\s+\[([a-z-]+)\](?:\s+\[[a-z-]+\])*\s*(?:"(.*?)"?)?\s*$')
@@ -27,6 +27,9 @@ TAPPABLE = {"button", "link", "other", "cell", "tab", "switch", "checkbox", "men
 FIELDS = {"text-field", "secure-text-field", "editable", "search-field", "text-view", "textbox"}
 
 def run(args, timeout=120):
+    sess = os.environ.get("AGENT_DEVICE_SESSION", "")   # agent-device 0.21 reads --session, not the variable
+    if sess and "--session" not in args and args and args[0] not in ("devices", "help", "session"):
+        args = [*args, "--session", sess]
     p = subprocess.run([AD, *args], capture_output=True, text=True, timeout=timeout)
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
