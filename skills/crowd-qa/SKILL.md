@@ -154,7 +154,9 @@ report.
 Read `references/fixing.md` first. With the `cli` runner, crowd.py does everything. With `t3` or `subagent`, you
 run the job loop: `crowd.py "$RUN" jobs next`, launch each job as its own T3 thread or subagent (models picked from
 the live catalog: Opus fixes, Opus reviews, Sonnet re-checks, spread over the Claude accounts), then
-`jobs start` and `jobs done` as each one finishes, until every area is `done` or `needs-human`. Never put two
+`jobs start` and `jobs done` as each one finishes, until every area is `done` or `needs-human`. Keep `scripts/fix-watch.py "$RUN" --loop 60`
+under the monitor tool the whole time, so a stall, a failure or a free slot wakes you. `FIX_TRACKERS` limits which
+repos get fixes and PRs; the rest stay issues. Never put two
 jobs in one context and never pass one agent's transcript to another; the job prompt is all an agent gets.
 
 ## Step 8: Report to the user
@@ -194,6 +196,7 @@ nobody could test, and the spend from `crowd.py status`. Quote only URLs the tra
   report, status)
 - `scripts/fix-stack.sh` (a dev server per area, the backend queue), `scripts/fix-browser.sh` (a browser per job),
   `scripts/fix-device.sh` (a simulator or emulator per job, and a build of the fix branch for mobile areas),
+  `scripts/fix-watch.py` (the watch: free slots, stalls, failures, stack, quota and locks, no model call while all is well),
   `scripts/evidence.sh` (evidence pushes that never overwrite each other)
 - `scripts/run-tester.sh`: one character-day on any surface; per-character engine, lean Claude sessions in
   budget chunks, stack probe before start, per-engine quota pauses, browser slots

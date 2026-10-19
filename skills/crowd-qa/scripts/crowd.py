@@ -1231,13 +1231,17 @@ def slug(s):
 
 def bug_rows():
     """Every filed bug the fix stage can work on: {key: {issue number, title, tracker, reporter, confirmers...}}.
-    FIX_FROM_RUNS adds the issues earlier runs created (a make-up run fixes its parent's bugs too); this run wins."""
+    FIX_FROM_RUNS adds the issues earlier runs created (a make-up run fixes its parent's bugs too); this run wins.
+    FIX_TRACKERS="app" fixes only those trackers: the others keep their bugs as filed issues, never a branch or a PR."""
     out = {}
+    only = set(cfg("FIX_TRACKERS").split())
     for home in [*reversed(cfg("FIX_FROM_RUNS").split()), RUN]:
         issues = {x["key"]: x for x in jload(os.path.join(home, "state", "issues.json"), [])}
         for k, v in jload(os.path.join(home, "state", "filed.json"), {}).items():
             num = re.search(r"/issues/(\d+)", v.get("issue") or v.get("url", ""))
             if not num or (home != RUN and v.get("action", "create") not in ("create", "regression")):
+                continue
+            if only and v.get("tracker", "app") not in only:
                 continue
             x = issues.get(k, {})
             out[k] = {"key": k, "issue": int(num.group(1)), "title": v["title"], "tracker": v.get("tracker", "app"),

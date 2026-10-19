@@ -71,6 +71,21 @@ For each job:
   again until every area is `done` or `needs-human` (`crowd.py "$RUN" jobs list`).
 - When every area is finished: `crowd.py "$RUN" report`.
 
+### The watch
+`scripts/fix-watch.py "$RUN" --loop 60` checks the fix stage every minute with no model call: queued jobs with a
+free slot (READY), a running job that has written nothing for `WATCH_STALL_MIN` minutes (STALLED), failed jobs and
+areas left to a person (FAILED), the stack (`STACK_VERIFY`, else `WATCH_URL`), a paused engine (QUOTA), new error
+lines in `crowd.log` (ERROR), device or backend locks held by a job that is not running (LOCK), and the end
+(DONE). It prints only what changed. With `t3` or `subagent`, run it under the session's monitor tool from the
+first `jobs next`: each line wakes the session, which launches READY jobs and deals with the rest, and a quiet
+watch costs nothing. `WATCH_AGENT=on` gives each new problem one low-effort model call (`WATCH_MODEL`, default
+opus) with only that line and the job's last 40 log lines; the two-line diagnosis is appended to the event and
+to `logs/watch.md`.
+
+### Issues only for some repos
+`FIX_TRACKERS="app"` lets the fix stage change only those trackers. Bugs filed on the others stay issues: no
+area, no branch, no PR. Use it when a team wants the crowd's reports on a repo but not its patches.
+
 ### Picking models (t3)
 `FIX_MODEL`, `REVIEW_MODEL` and `RECHECK_MODEL` set to `instance:model` are used as given. `auto` means: read
 `orchestrator_capabilities` once at the start and pick from the live catalog:
