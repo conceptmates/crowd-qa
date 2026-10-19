@@ -1088,13 +1088,14 @@ class SquareView(unittest.TestCase):
     """square-view.py: state.json for the 3D world, index.html (world) and square.html (2D) from one pass."""
 
     SHAPE = {"run": {"name", "date", "days", "stage", "updated"},
-             "characters": {"id", "name", "role", "surface", "status", "day", "done", "total", "bugs", "color", "shot"},
+             "characters": {"id", "name", "role", "surface", "status", "day", "done", "total", "bugs", "color", "shot", "engine"},
              "posts": {"id", "author", "kind", "text", "ts", "parent", "shot"},
              "bugs": {"key", "title", "severity", "reporter", "confirmers", "state", "url", "area"},
              "jobs": {"id", "role", "area", "status", "runner", "model", "thread", "persona", "started"},
              "bouts": {"id", "kind", "a", "b", "subject", "rounds", "winner", "scores", "status"},
              "prs": {"area", "url", "number", "status", "stage", "bugs", "recheck"},
-             "watch": {"on", "problems", "recent"}}
+             "watch": {"on", "problems", "recent"},
+             "usage": {"engines", "steps", "fix_usd", "fix_tokens", "total_usd"}}
 
     def render(self, r):
         res = subprocess.run(["python3", os.path.join(SKILL, "scripts", "square-view.py"), r.dir], capture_output=True, text=True, timeout=60)
@@ -1103,10 +1104,10 @@ class SquareView(unittest.TestCase):
 
     def assertShape(self, st):
         self.assertEqual(set(st), set(self.SHAPE))
-        for one in ("run", "watch"):          # objects, not lists
+        for one in ("run", "watch", "usage"):   # objects, not lists
             self.assertTrue(self.SHAPE[one] <= set(st[one]))
         for k, keys in self.SHAPE.items():
-            for item in ([] if k in ("run", "watch") else st[k]):
+            for item in ([] if k in ("run", "watch", "usage") else st[k]):
                 self.assertTrue(keys <= set(item), f"{k}: missing {keys - set(item)}")
 
     def test_state_json_from_every_pipeline_source(self):
@@ -1182,6 +1183,23 @@ class SquareView(unittest.TestCase):
         for f in ("square.html", "state.js", "square-data.js"):
             self.assertTrue(os.path.exists(r.path("square", f)), f)
         self.assertIn('"Checkout hangs"', r.read("square", "square-data.js"), "the 2D page polls this in place")
+
+    def test_the_bank_reads_the_quota_guard_and_what_jobs_spent(self):
+        r = Run("squareview-bank", lanes("maya"), plans=False)
+        open(r.path("quota.log"), "w").write(
+            "10:57:57 codex active=redgear primary=0% weekly=29% fallback=no | mhd:0/- redgear:0/29 \n"
+            "10:57:59 claude active=a primary=100% weekly=-% paused=yes | a:100/- b:-/- \n")
+        open(r.path("state", "costs.jsonl"), "w").write('{"step": "judge:maya", "usd": 1.5}\n{"step": "plan:maya", "usd": 0.25}\n')
+        json.dump({"fix-x-1": {"id": "fix-x-1", "role": "fix", "area": "x", "status": "running", "result": "",
+                               "model": "claude:opus"}}, open(r.path("state", "jobs.json"), "w"))
+        json.dump({"fix-x-1": {"tokens": 1200}}, open(r.path("state", "job-usage.json"), "w"))
+        u = self.render(r)["usage"]
+        self.assertTrue(u["engines"]["claude"]["paused"], "a paused engine puts its people to sleep")
+        self.assertFalse(u["engines"]["codex"]["paused"])
+        self.assertEqual([(a["name"], a["primary"], a["weekly"]) for a in u["engines"]["codex"]["accounts"]],
+                         [("mhd", "0", "-"), ("redgear", "0", "29")])
+        self.assertEqual(u["steps"], {"judge": 1.5, "plan": 0.25})
+        self.assertEqual(u["fix_tokens"], 1200)
 
     def test_a_fresh_run_gives_empty_lists_not_a_crash(self):
         r = Run("squareview-empty", lanes("maya"), plans=False)

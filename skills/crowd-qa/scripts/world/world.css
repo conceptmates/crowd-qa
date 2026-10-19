@@ -91,3 +91,7 @@ body.sq-open #sq{transform:none}
 #card .gh .lb{align-self:flex-start;border-radius:10px;padding:0 7px;font-size:10px;font-weight:700;background:#eef0f6;margin-top:2px}
 #card .gh .lb.blocker,#card .gh .lb.critical{background:#ffebe9;color:#cf222e}#card .gh .lb.major,#card .gh .lb.high{background:#fff1e5;color:#bc4c00}
 #card .gh .lb.pr{background:#fbefff;color:#8250df}
+.tag.zz::after{content:"💤";margin-left:3px}
+#card .acct{display:grid;grid-template-columns:auto 26px 1fr 34px 30px 1fr 34px;gap:4px;align-items:center;font-size:11px;padding:3px 0}
+#card .acct b{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:80px}
+#card .bar{height:7px;background:#eef0f6;border-radius:4px;overflow:hidden}#card .bar i{display:block;height:100%}

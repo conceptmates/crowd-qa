@@ -134,7 +134,9 @@ Steps can also run alone (`crowd.py "$RUN" file`). Model steps default to Opus (
 While `square-view.py` runs, `$RUN/square/index.html` is the run as a 3D town: characters walk between the
 product building (testing), the bench, the courthouse (being judged), the plaza (their posts as speech bubbles)
 and their houses, and in the fix stage between the workshop, the review booth, the arena (bouts) and the harbour
-(one boat per PR). Click anyone for their card; job cards link to their T3 thread. `square.html` is the
+(one boat per PR, tagged with its area's live stage), the watchtower (fix-watch.py's lookout) and the bank
+(each engine's usage limit per account and what the run spent; when an engine is paused at its limit, everyone on
+it sleeps). Click anyone for their card; job cards link to their T3 thread. `square.html` is the
 Discord-style square of every post and reply, with filters; both read `square/state.json`. `restart-watchers.sh`
 also serves them (`square-serve.py`, only the pages and screenshots, never config or state) on this machine's
 Tailscale address and prints the URL; `crowd.py status` repeats it. Give the user that URL at launch.

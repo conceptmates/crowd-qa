@@ -82,6 +82,13 @@ watch costs nothing. `WATCH_AGENT=on` gives each new problem one low-effort mode
 opus) with only that line and the job's last 40 log lines; the two-line diagnosis is appended to the event and
 to `logs/watch.md`.
 
+### Usage of each job
+A cli job's cost is read from the `total_cost_usd` line `claude -p` leaves in `logs/job-<id>.log`. A subagent or t3
+job's usage only reaches the session, in the agent's completion notice: write it to `state/job-usage.json` as
+`{"<job id>": {"tokens": N}}` when you run `jobs done`, so the bank in the 3D town can show what each job used.
+Tell every agent to keep helper files in its own `mktemp -d`: two jobs that wrote the same fixed `/tmp` name once
+sent each other's commands to the wrong device.
+
 ### Issues only for some repos
 `FIX_TRACKERS="app"` lets the fix stage change only those trackers. Bugs filed on the others stay issues: no
 area, no branch, no PR. Use it when a team wants the crowd's reports on a repo but not its patches.

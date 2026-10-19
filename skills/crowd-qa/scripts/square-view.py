@@ -262,6 +262,7 @@ def world_state(run, data):
             words = {result_word(r) for r in res["results"]}
             res = next((w for w in ("fail", "partial", "pass") if w in words), "")
         jobs[-1]["result"] = result_word(res) if j.get("role") == "recheck" else ""
+        jobs[-1].update(job_usage(run, j["id"]))
     prs = []
     live = read(f"{s}/areas-detail.json", {}) or {}
     for pr in as_list(read(f"{s}/prs.json", {}), "area"):
@@ -300,6 +301,7 @@ def world_state(run, data):
     chars = [{"id": p["id"], "name": p["name"], "role": p["role"], "surface": p["surface"],
               "status": busy.get(p["id"]) or STATUS.get(p["status"]) or "waiting", "day": p["day"], "done": p["done"],
               "total": p["total"], "bugs": sum(1 for b in bugs if b["reporter"] == p["id"]), "color": col[p["id"]],
+              "engine": "codex" if str(p.get("engine", "")).startswith("cod") else "claude",
               "shot": p["live"]} for p in people]
     posts = [{"id": e.get("id", ""), "author": e.get("author", ""), "kind": (e.get("kind") or "post").replace("-", ""),
               "text": e.get("text", ""), "ts": e.get("ts", ""), "parent": e.get("ref") or "", "shot": e.get("img", "")}
@@ -313,7 +315,50 @@ def world_state(run, data):
                     "stage": stage(run, people, jobs, prs, areas), "updated": time.strftime("%Y-%m-%dT%H:%M:%S")},
             "characters": chars, "posts": posts, "bugs": bugs,
             "jobs": [{k: v for k, v in j.items() if k != "result"} | ({"result": j["result"]} if j["result"] else {}) for j in jobs],
-            "bouts": bouts, "prs": prs, "watch": watch_state(run)}
+            "bouts": bouts, "prs": prs, "watch": watch_state(run), "usage": usage_state(run, jobs)}
+
+
+_USAGE = {}
+def job_usage(run, jid):
+    """Tokens and dollars one fix job used: a subagent's from state/job-usage.json (the orchestrator writes what each
+    agent's completion reports), a cli job's from the cost line claude -p leaves at the end of its log."""
+    if "file" not in _USAGE:
+        _USAGE["file"] = read(f"{run}/state/job-usage.json", {}) or {}
+    u = dict(_USAGE["file"].get(jid) or {})
+    log = f"{run}/logs/job-{jid}.log"
+    if "usd" not in u and os.path.exists(log):
+        m = re.findall(r'"total_cost_usd":\s*([0-9.]+)', read(log, "") or "")
+        if m and float(m[-1]):
+            u["usd"] = round(float(m[-1]), 2)
+    return {k: u[k] for k in ("tokens", "usd") if k in u}
+
+
+def usage_state(run, jobs):
+    """The bank: each engine's limit use from quota.log, and what the run has spent so far."""
+    engines = {}
+    for line in (read(f"{run}/quota.log", "") or "").splitlines():
+        m = re.match(r"\S+ (claude|codex) active=(\S+) primary=(\S+) weekly=(\S+) (?:paused|fallback)=(\w+) \| (.*)", line.strip())
+        if not m:
+            continue
+        accts = []
+        for a in m.group(6).split():
+            name, _, v = a.rpartition(":")
+            p5, _, wk = v.partition("/")
+            accts.append({"name": name, "primary": p5, "weekly": wk})
+        engines[m.group(1)] = {"active": m.group(2), "primary": m.group(3), "weekly": m.group(4),
+                               "paused": m.group(5) == "yes", "accounts": accts, "at": line[:8]}
+    steps = {}
+    for line in (read(f"{run}/state/costs.jsonl", "") or "").splitlines():
+        try:
+            c = json.loads(line)
+        except ValueError:
+            continue
+        k = str(c.get("step", "")).split(":")[0] or "other"
+        steps[k] = round(steps.get(k, 0) + float(c.get("usd") or 0), 2)
+    fix_usd = round(sum(j.get("usd", 0) for j in jobs), 2)
+    return {"engines": engines, "steps": steps, "fix_usd": fix_usd,
+            "fix_tokens": sum(j.get("tokens", 0) for j in jobs),
+            "total_usd": round(sum(steps.values()) + fix_usd, 2)}
 
 
 def watch_state(run):
