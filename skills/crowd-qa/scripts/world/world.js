@@ -266,12 +266,26 @@ const BANK = V(-8, 0, 17);
   box(g, [2.4, 0.9, 0.2], [0, 4.1, 2.75], {color: "#d4a017"});   // sign
   box(g, [1.3, 2.4, 0.15], [0, 1.7, 1.95], {color: C.darkwood});
 }
-// yards beside the workshop and the booth, where finished jobs stand
-const YARDS = {};
-for (const [k, x, z] of [["workshop", 2 - 22 + 3.9, 30 - 6.5], ["booth", 20 + 9.5 + 3.9, 30 - 6.5]]) {
-  const g = at(x, z);
-  box(g, [12, 0.15, 0.3], [0, 0.4, 0], {color: C.darkwood});
-  YARDS[k] = label(g, "Finished<small></small>", "zone", 3, [0.5, 0.5]);
+// playground: finished fixers and reviewers play here, every third one naps on a mat; failed jobs sit on the bench
+const PLAY = V(12, 0, 52);
+const PLAY_SPOTS = [[5, 48.8], [7, 48.8], [18.6, 50.6], [10, 52.2], [14, 52.2], [12, 55], [8.6, 55.4], [15.4, 55.4],
+  [3, 52.5], [21, 52.5], [5.5, 56], [18.5, 56]];
+{
+  const g = zone("playground", "Playground", PLAY.x, PLAY.z, V(12, 0, 22), () => ({pos: V(PLAY.x, 0, PLAY.z), yaw: 0}), 7);
+  path(V(12, 0, 22), V(12, 0, 46), 2.4);
+  box(g, [24, 0.08, 16], [0, 0.04, 2], {color: "#a8dc84", cast: false});           // lawn
+  box(g, [6, 0.35, 4], [0, 0.18, 1], {color: "#f2d48b"});                          // sandbox
+  for (const [w, d, x, z] of [[6.3, 0.3, 0, -1.05], [6.3, 0.3, 0, 3.05], [0.3, 4.3, -3.05, 1], [0.3, 4.3, 3.05, 1]]) box(g, [w, 0.5, d], [x, 0.25, z], {color: C.wood});
+  for (const x of [-8.6, -4.4]) box(g, [0.3, 4.2, 0.3], [x, 2.1, -4], {color: "#e2574c"});   // swing frame
+  box(g, [4.6, 0.3, 0.3], [-6.5, 4.2, -4], {color: "#e2574c"});
+  for (const x of [-7.6, -5.4]) { box(g, [0.06, 2.6, 0.06], [x, 2.9, -4], {color: "#555"}); box(g, [0.9, 0.12, 0.5], [x, 1.55, -4], {color: "#5865f2"}) }
+  box(g, [0.3, 3.2, 0.3], [5.2, 1.6, -4.6], {color: "#ffcd4d"});                   // slide: ladder, top, chute
+  box(g, [0.3, 3.2, 0.3], [6.4, 1.6, -4.6], {color: "#ffcd4d"});
+  box(g, [1.6, 0.25, 1.4], [5.8, 3.2, -4], {color: "#ffcd4d"});
+  box(g, [1.2, 0.18, 4.6], [5.8, 1.7, -1.6], {color: "#23a55a", rx: 0.62});
+  for (let i = 0; i < 7; i++) box(g, [2.2, 0.12, 1.2], [-7.8 + i * 2.6, 0.1, 6.5], {color: ["#ffd8b0", "#dbeeff", "#e9f7d9", "#ffe0ea", "#efe4ff", "#fff4c2", "#d8f3f0"][i]});   // nap mats
+  box(g, [5, 0.3, 1.2], [10, 0.75, 4.5], {color: C.wood});                         // bench for the failed
+  box(g, [5, 0.9, 0.2], [10, 1.35, 5.05], {color: C.wood});
 }
 // harbour: a pier; boats are dynamic
 const WATER_X = 42;
@@ -665,18 +679,18 @@ function zoneCounts(S, liveBout, bout) {
   const n = st => S.characters.filter(c => c.status === st).length;
   const sub = {product: `${n("testing")} testing${n("rechecking") ? ` · ${n("rechecking")} re-testing` : ""}`, bench: `${by.bench || 0} waiting`, court: `${by.court || 0} being judged`,
     houses: `${by.houses || 0} done for the day`, bank: Object.entries((S.usage || {}).engines || {}).map(([e, x]) => `${e} ${x.paused ? "💤 paused" : x.primary}`).join(" · ") || "no quota guard",
+    playground: (() => {
+      const fin = S.jobs.filter(j => ["fix", "review"].includes(j.role) && ["done", "failed"].includes(String(j.status || "").toLowerCase()));
+      const bad = fin.filter(j => String(j.status).toLowerCase() === "failed").length, done = fin.length - bad;
+      return fin.length ? `${done} done${done > 2 ? ` · ${Math.floor(done / 3)} napping` : ""}${bad ? ` · ${bad} failed` : ""}` : "nobody finished yet";
+    })(),
     watch: (S.watch || {}).on ? `${((S.watch || {}).problems || []).length || "no"} open problems` : "off duty",
     workshop: `${fr} fixing${fq ? ` · ${fq} waiting` : ""}${fd ? ` · ${fd} done` : ""}`,
     booth: `${rr} reviewing${rq ? ` · ${rq} waiting` : ""}${rd ? ` · ${rd} done` : ""}`,
     arena: bout ? (bout.winner ? "last bout: " + clip(bout.winner, 16) + " won" : clip(bout.subject || bout.kind || "bout", 26)) : "no bout", harbour: `${S.prs.length} PR${S.prs.length === 1 ? "" : "s"}`,
     post: `${S.bugs.filter(b => ["filed", "in-pr"].includes(b.state)).length} filed`, plaza: `${S.posts.length} posts`};
   for (const [k, z] of Object.entries(ZONES)) { const el = z.lbl.element.querySelector("small"); if (el) el.textContent = sub[k] || "" }
-  const fin = r => S.jobs.filter(j => j.role === r && ["done", "failed"].includes(String(j.status || "").toLowerCase()));
-  for (const [k, r] of [["workshop", "fix"], ["booth", "review"]]) {
-    const js = fin(r), bad = js.filter(j => String(j.status).toLowerCase() === "failed").length;
-    YARDS[k].element.querySelector("small").textContent = `${js.length - bad} done${bad ? ` · ${bad} failed` : ""}`;
-    YARDS[k].element.style.display = js.length ? "" : "none";
-  }
+
 }
 function postHtml(p) {
   return `${p.kind !== "post" ? `<span class="k ${esc(p.kind)}">${esc(p.kind.replace("metoo", "me too").replace("cantrepro", "can't repro"))}</span>` : ""}${esc(clip(p.text, 120))}`;
@@ -718,11 +732,16 @@ function apply(next) {
   for (const j of S.jobs) if (byRole[j.role] && (j.role !== "recheck" || !chars.has(j.persona))) byRole[j.role].push(j);
   // only running jobs stand at the station; queued ones line up in front of it (QUEUE_SHOWN at most, the zone
   // label counts the rest); done and failed jobs leave: their work is a boat in the harbour
-  const yard = {};
-  const yardSlot = (zk, n) => {   // finished jobs: the workshop's yard is to its left, the booth's to its right
-    const z = ZONES[zk], row = Math.floor(n / 4), col = n % 4;
-    const x0 = zk === "workshop" ? z.x - 22 : z.x + 9.5;
-    return {pos: V(x0 + col * 2.6, 0, z.z - 4 + row * 2.6), yaw: 0};
+  let played = 0, benched = 0;
+  const PLAYS = ["cheer", "wait", "sit", "inspect"];
+  const playSlot = (n, failed) => {   // finished jobs go to the playground (one counter for fixers and reviewers)
+    if (failed) return {pos: V(PLAY.x - 1.8 + (n % 4) * 1.2, 0, PLAY.z + 6.2 + Math.floor(n / 4) * 1.6), yaw: Math.PI, anim: "crossed"};
+    if (n % 3 === 2) {                // every third one naps on a mat
+      const k = Math.floor(n / 3);
+      return {pos: V(PLAY.x - 7.8 + (k % 7) * 2.6, 0, PLAY.z + 8.5 + Math.floor(k / 7) * 1.8), yaw: Math.PI, anim: "sleep"};
+    }
+    const k = n - Math.floor(n / 3), [x, z] = PLAY_SPOTS[k] || [PLAY.x - 9 + (k % 8) * 2.6, PLAY.z + 11 + Math.floor((k - PLAY_SPOTS.length) / 8) * 2.4];
+    return {pos: V(x, 0, z), yaw: (k * 1.3) % (Math.PI * 2), anim: PLAYS[k % PLAYS.length]};
   };
   const queueSlot = (zk, q) => {
     const z = ZONES[zk], row = Math.floor(q / 4), col = q % 4;
@@ -736,7 +755,7 @@ function apply(next) {
       if (finished && role === "recheck") return;   // a finished re-check shows as a badge on its character
       const queued = st0 === "queued";
       if (queued && q >= QUEUE_SHOWN) return;
-      const i = finished ? (yard[zk] = (yard[zk] ?? -1) + 1) : queued ? q++ : w++;
+      const i = finished ? (st0 === "failed" ? benched++ : played++) : queued ? q++ : w++;
       const k = "job:" + j.id;
       live.add(k);
       const f = npc(k, {id: j.persona || j.id, color: {fix: "#e08a3c", review: "#f4b942", recheck: "#8957e5"}[role], name: j.area});
@@ -746,9 +765,10 @@ function apply(next) {
       // running jobs carry their area; queued and finished ones only an icon (click any figure for its card)
       f.setTag(`<span class="ic">${ic}</span>${queued || finished ? "" : esc(clip(j.area || j.id, 16))}`);
       const idx = role === "recheck" ? 19 - i : i;
-      const {pos, yaw} = finished ? yardSlot(zk, i) : queued && role !== "recheck" ? queueSlot(zk, i) : ZONES[zk].slot(idx);
-      const anim = st === "running" ? ANIM[zk] : queued ? "wait" : st0 === "failed" ? "crossed" : "idle";
-      const key = zk + (finished ? ":d" : queued ? ":q" : ":w") + i;
+      const spot = finished ? playSlot(i, st0 === "failed") : queued && role !== "recheck" ? queueSlot(zk, i) : ZONES[zk].slot(idx);
+      const {pos, yaw} = spot;
+      const anim = st === "running" ? ANIM[zk] : queued ? "wait" : spot.anim || "idle";
+      const key = (finished ? "play:" + (st0 === "failed" ? "b" : "p") : zk + (queued ? ":q" : ":w")) + i;
       if (f.slotKey !== key) { f.place(pos, yaw, anim); f.slotKey = key }
       f.anim = anim;
     });
@@ -772,7 +792,7 @@ function apply(next) {
     if (!k.startsWith("job:") || !f.job) continue;
     const e = String(f.job.model || "claude").split(":")[0], z = f.job.status === "running" && asleep(e);
     if (z) f.anim = "sleep";
-    f.tag.element.classList.toggle("zz", z);
+    f.tag.element.classList.toggle("zz", z || f.anim === "sleep");   // nappers in the playground too
   }
   setBout(bout, bout === liveBout);
   S.prs.forEach((pr, i) => boat(pr, i));
