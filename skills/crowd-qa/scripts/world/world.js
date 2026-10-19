@@ -18,6 +18,7 @@ const ICON = {testing: "💻", waiting: "⏳", judged: "⚖️", done: "🏠", b
 const STATUS_TEXT = {testing: "testing now", waiting: "waiting", judged: "being judged", done: "day done", blocked: "blocked",
   fixing: "fixing", rechecking: "re-testing a fix"};
 const threadUrl = t => !t ? "" : /^[a-z][\w+.-]*:\/\//i.test(t) ? t : "t3-thread://v1/" + encodeURIComponent(String(t).replace(/^t3:/i, ""));
+const QUEUE_SHOWN = 8;   // queued jobs drawn per station; the rest are only counted
 const active = s => ["queued", "running", "open", "active", "fighting", ""].includes(String(s || "").toLowerCase());
 
 // ---------------------------------------------------------------- renderer, camera, lights
@@ -180,7 +181,7 @@ const HOUSES = [[-41, 27], [-32, 27], [-23, 27], [-41, 40], [-32, 40], [-23, 40]
 {
   const g = zone("houses", "Houses", 0, 0, V(-17, 0, 22), i => {
     const [hx, hz] = HOUSES[i % HOUSES.length], k = Math.floor(i / HOUSES.length);
-    return {pos: V(hx - 1.9 + (k % 3) * 1.9, 0, hz + 4.4 + Math.floor(k / 3) * 1.8), yaw: 0.25 - (k % 3) * 0.25};
+    return {pos: V(hx - 2.4 + (k % 3) * 2.4, 0, hz + 4 + (k % 3) * 1.5 + Math.floor(k / 3) * 4.5), yaw: 0.25 - (k % 3) * 0.25};
   });
   ZONES.houses.lbl.position.set(-32, 9.5, 27);
   const walls = ["#f8e6c8", "#ffd8b0", "#dbeeff", "#e9f7d9", "#ffe0ea", "#efe4ff"], roofs = [C.red, "#4a90d9", C.green, "#e08a3c", "#c0577a", "#7b68c9"];
@@ -240,6 +241,15 @@ const POST_OFFICE = V(33, 0, -24);
   mesh(g, CONE4, "#c23f33", [8.4, 2.6, 6.4], [0, 6.3, -1], {ry: Math.PI / 4});
   box(g, [1.6, 2.4, 0.2], [0, 1.2, 2.05], {color: "#6b3a2a"});
   box(g, [0.9, 1.4, 0.9], [3, 0.7, 2.8], {color: "#e2574c"});   // post box
+  ZONES.post.lbl.element.classList.add("click");
+  ZONES.post.lbl.element.addEventListener("click", ev => { ev.stopPropagation(); showPost() });
+}
+// yards beside the workshop and the booth, where finished jobs stand
+const YARDS = {};
+for (const [k, x, z] of [["workshop", 2 - 22 + 3.9, 30 - 6.5], ["booth", 20 + 9.5 + 3.9, 30 - 6.5]]) {
+  const g = at(x, z);
+  box(g, [12, 0.15, 0.3], [0, 0.4, 0], {color: C.darkwood});
+  YARDS[k] = label(g, "Finished<small></small>", "zone", 3, [0.5, 0.5]);
 }
 // harbour: a pier; boats are dynamic
 const WATER_X = 42;
@@ -306,6 +316,11 @@ const HAIR = ["#2b1d14", "#4a3020", "#151515", "#7a4a22", "#c9a35a", "#5b5b5b"].
 const PANTS = mat("#3b4559"), EYE = mat("#1b1e26");
 const FIG = 1.5;   // figures are drawn at 1.5x so they read next to the buildings
 const pickables = [];
+{ // the post office opens the list of filed issues
+  const hit = new THREE.Mesh(BOX, new THREE.MeshBasicMaterial({visible: false}));
+  hit.scale.set(9, 8, 8); hit.position.set(POST_OFFICE.x, 4, POST_OFFICE.z - 1); hit.userData.post = true;
+  scene.add(hit); pickables.push(hit);
+}
 const lerpAngle = (a, b, t) => { let d = ((b - a + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI; return a + d * t };
 
 class Figure {
@@ -535,12 +550,12 @@ function boat(pr, i) {
   b.pr = pr;
   const st = String(pr.status || "").toLowerCase();
   const out = ["open", "draft", "merged", "ready"].includes(st);
-  const dock = V(55.2, 0, -2 + (i % 6) * 4), sea = V(st === "merged" ? 76 : 60 + (i % 3) * 5, 0, -22 + i * 6);
+  const dock = V(55.2 + (i % 2) * 5, 0, -6 + Math.floor(i / 2) * 4.4 + (i % 2) * 2.2), sea = V(st === "merged" ? 76 : 60 + (i % 3) * 5, 0, -22 + i * 6);
   const to = out ? sea : dock;
   b.flag.material = mat({open: "#23a55a", draft: "#9aa1b1", merged: "#8957e5", closed: "#e5484d"}[st] || "#cccccc");
   b.sail.material = mat(st === "draft" ? "#e6e8ee" : "#ffffff");
   const rc = pr.recheck || {};
-  b.lbl.element.innerHTML = `⛵ ${esc(clip(pr.area, 18))}${pr.number ? " #" + esc(pr.number) : ""} · ${esc(st || "?")}${(rc.pass || rc.partial || rc.fail) ? ` · ✅${rc.pass || 0} 🟨${rc.partial || 0} ❌${rc.fail || 0}` : ""}`;
+  b.lbl.element.innerHTML = `${pr.number ? "#" + esc(pr.number) + " " : ""}${esc(clip(pr.area, 16))} · ${esc(st || "?")}${(rc.pass || rc.partial || rc.fail) ? ` · ✅${rc.pass || 0} 🟨${rc.partial || 0} ❌${rc.fail || 0}` : ""}`;
   if (!b.to.equals(to)) {
     if (first) { b.g.position.copy(to); b.from.copy(to) } else b.from.copy(b.g.position);
     b.to.copy(to);
@@ -608,13 +623,24 @@ function hud(S) {
 function zoneCounts(S, liveBout, bout) {
   const by = {};
   for (const c of S.characters) { const z = charZone(c, liveBout); by[z] = (by[z] || 0) + 1 }
-  const jobs = r => S.jobs.filter(j => j.role === r && active(j.status)).length;
+  const jobs = r => {
+    const of = st => S.jobs.filter(j => j.role === r && String(j.status || "").toLowerCase() === st).length;
+    return [of("running"), of("queued"), of("done")];
+  };
+  const [fr, fq, fd] = jobs("fix"), [rr, rq, rd] = jobs("review");
   const n = st => S.characters.filter(c => c.status === st).length;
   const sub = {product: `${n("testing")} testing${n("rechecking") ? ` · ${n("rechecking")} re-testing` : ""}`, bench: `${by.bench || 0} waiting`, court: `${by.court || 0} being judged`,
-    houses: `${by.houses || 0} done for the day`, workshop: `${jobs("fix")} fixing`, booth: `${jobs("review")} reviewing`,
+    houses: `${by.houses || 0} done for the day`, workshop: `${fr} fixing${fq ? ` · ${fq} waiting` : ""}${fd ? ` · ${fd} done` : ""}`,
+    booth: `${rr} reviewing${rq ? ` · ${rq} waiting` : ""}${rd ? ` · ${rd} done` : ""}`,
     arena: bout ? (bout.winner ? "last bout: " + clip(bout.winner, 16) + " won" : clip(bout.subject || bout.kind || "bout", 26)) : "no bout", harbour: `${S.prs.length} PR${S.prs.length === 1 ? "" : "s"}`,
     post: `${S.bugs.filter(b => ["filed", "in-pr"].includes(b.state)).length} filed`, plaza: `${S.posts.length} posts`};
   for (const [k, z] of Object.entries(ZONES)) { const el = z.lbl.element.querySelector("small"); if (el) el.textContent = sub[k] || "" }
+  const fin = r => S.jobs.filter(j => j.role === r && ["done", "failed"].includes(String(j.status || "").toLowerCase()));
+  for (const [k, r] of [["workshop", "fix"], ["booth", "review"]]) {
+    const js = fin(r), bad = js.filter(j => String(j.status).toLowerCase() === "failed").length;
+    YARDS[k].element.querySelector("small").textContent = `${js.length - bad} done${bad ? ` · ${bad} failed` : ""}`;
+    YARDS[k].element.style.display = js.length ? "" : "none";
+  }
 }
 function postHtml(p) {
   return `${p.kind !== "post" ? `<span class="k ${esc(p.kind)}">${esc(p.kind.replace("metoo", "me too").replace("cantrepro", "can't repro"))}</span>` : ""}${esc(clip(p.text, 120))}`;
@@ -654,19 +680,40 @@ function apply(next) {
   const live = new Set();
   const byRole = {fix: [], review: [], recheck: []};
   for (const j of S.jobs) if (byRole[j.role] && (j.role !== "recheck" || !chars.has(j.persona))) byRole[j.role].push(j);
+  // only running jobs stand at the station; queued ones line up in front of it (QUEUE_SHOWN at most, the zone
+  // label counts the rest); done and failed jobs leave: their work is a boat in the harbour
+  const yard = {};
+  const yardSlot = (zk, n) => {   // finished jobs: the workshop's yard is to its left, the booth's to its right
+    const z = ZONES[zk], row = Math.floor(n / 4), col = n % 4;
+    const x0 = zk === "workshop" ? z.x - 22 : z.x + 9.5;
+    return {pos: V(x0 + col * 2.6, 0, z.z - 4 + row * 2.6), yaw: 0};
+  };
+  const queueSlot = (zk, q) => {
+    const z = ZONES[zk], row = Math.floor(q / 4), col = q % 4;
+    return {pos: V(z.x - 5.1 + col * 3.4, 0, z.z + 7 + row * 3), yaw: Math.PI};
+  };
   for (const [role, zk] of [["fix", "workshop"], ["review", "booth"], ["recheck", "product"]]) {
-    byRole[role].forEach((j, i) => {
+    let w = 0, q = 0;
+    byRole[role].forEach(j => {
+      const st0 = String(j.status || "").toLowerCase();
+      const finished = st0 === "done" || st0 === "failed";
+      if (finished && role === "recheck") return;   // a finished re-check shows as a badge on its character
+      const queued = st0 === "queued";
+      if (queued && q >= QUEUE_SHOWN) return;
+      const i = finished ? (yard[zk] = (yard[zk] ?? -1) + 1) : queued ? q++ : w++;
       const k = "job:" + j.id;
       live.add(k);
       const f = npc(k, {id: j.persona || j.id, color: {fix: "#e08a3c", review: "#f4b942", recheck: "#8957e5"}[role], name: j.area});
       f.job = j;
       const st = String(j.status || "").toLowerCase();
       const ic = st === "done" ? (j.result ? {pass: "✅", partial: "🟨", fail: "❌"}[j.result] : "✅") : st === "failed" ? "❌" : st === "queued" ? "⏳" : {fix: "🔨", review: "🔍", recheck: "🔁"}[role];
-      f.setTag(`<span class="ic">${ic}</span>${esc(clip(j.area || j.id, 18))}${j.model ? ` · ${esc(clip(j.model, 14))}` : ""}`);
+      // running jobs carry their area; queued and finished ones only an icon (click any figure for its card)
+      f.setTag(`<span class="ic">${ic}</span>${queued || finished ? "" : esc(clip(j.area || j.id, 16))}`);
       const idx = role === "recheck" ? 19 - i : i;
-      const {pos, yaw} = ZONES[zk].slot(idx);
-      const anim = st === "running" ? ANIM[zk] : st === "queued" ? "wait" : st === "failed" ? "crossed" : "idle";
-      if (f.slotKey !== zk + i) { f.place(pos, yaw, anim); f.slotKey = zk + i }
+      const {pos, yaw} = finished ? yardSlot(zk, i) : queued && role !== "recheck" ? queueSlot(zk, i) : ZONES[zk].slot(idx);
+      const anim = st === "running" ? ANIM[zk] : queued ? "wait" : st0 === "failed" ? "crossed" : "idle";
+      const key = zk + (finished ? ":d" : queued ? ":q" : ":w") + i;
+      if (f.slotKey !== key) { f.place(pos, yaw, anim); f.slotKey = key }
       f.anim = anim;
     });
   }
@@ -742,6 +789,21 @@ function showBoat(area) {
     <h3>Bugs in this PR · ${titles.length}</h3>${titles.map(t => `<div class="post">${esc(clip(t, 120))}</div>`).join("")}
     <div class="act">${pr.url ? `<a class="go" href="${esc(pr.url)}" target="_blank" rel="noopener">Open PR</a>` : `<button disabled>No PR link yet</button>`}</div>`);
 }
+// the post office: every bug that reached GitHub, newest issue first, drawn like GitHub's own issue list
+function showPost() {
+  const nm = id => (S.characters.find(c => c.id === id) || {}).name || "";
+  const gh = u => { const m = /github\.com\/([^/]+\/[^/]+)\/(issues|pull)\/(\d+)(#issuecomment)?/.exec(u || ""); return m ? {repo: m[1].split("/")[1], n: +m[3], comment: !!m[4]} : null };
+  const rows = S.bugs.filter(b => b.url && ["filed", "in-pr"].includes(b.state)).map(b => ({b, g: gh(b.url)})).filter(r => r.g)
+    .sort((x, y) => (x.g.comment - y.g.comment) || y.g.n - x.g.n);
+  const created = rows.filter(r => !r.g.comment).length;
+  const row = ({b, g}) => `<a class="gh" href="${esc(b.url)}" target="_blank" rel="noopener">
+      <span class="st ${b.state === "in-pr" ? "pr" : g.comment ? "cm" : "op"}">${b.state === "in-pr" ? "⇄" : g.comment ? "💬" : "◉"}</span>
+      <span class="body"><b>${esc(clip(b.title, 110))}</b>
+      <span class="meta">${esc(g.repo)} #${g.n}${g.comment ? " · comment" : ""}${nm(b.reporter) ? " · by " + esc(nm(b.reporter)) : ""}${b.area ? " · " + esc(b.area) : ""}</span>
+      ${b.severity ? `<span class="lb ${esc(b.severity)}">${esc(b.severity)}</span>` : ""}${b.state === "in-pr" ? `<span class="lb pr">in a PR</span>` : ""}</span></a>`;
+  openCard(`<h2><i style="background:#c23f33"></i>Post office</h2><div class="sub">${created} issues filed · ${rows.length - created} comments on existing issues</div>
+    ${rows.map(row).join("") || `<div class="post">Nothing filed yet.</div>`}`);
+}
 function showBout(b) {
   const nm = id => (S.characters.find(c => c.id === id) || {}).name || id;
   openCard(`<h2><i style="background:#e2574c"></i>Bout · ${esc(b.kind || "dispute")}</h2><div class="sub">${esc(nm(b.a))} vs ${esc(nm(b.b))}${b.subject ? " · " + esc(clip(b.subject, 80)) : ""}</div>
@@ -777,6 +839,7 @@ renderer.domElement.addEventListener("pointerup", e => {
   const hit = ray.intersectObjects(pickables, false)[0];
   if (!hit) { card.hidden = true; select(null); return }
   if (hit.object.userData.boat) showBoat(hit.object.userData.boat);
+  else if (hit.object.userData.post) showPost();
   else select(hit.object.userData.fig);
 });
 renderer.domElement.addEventListener("pointermove", e => {

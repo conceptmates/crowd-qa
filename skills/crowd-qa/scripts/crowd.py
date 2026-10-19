@@ -1454,7 +1454,7 @@ def bout(kind, a_name, b_name, subject, attack, defense, context="", rounds=None
     b = {"id": bid, "kind": kind, "a": a_name, "b": b_name, "subject": subject, "day": day, "status": "fighting",
          "rounds": [{"by": "a", "text": attack, "severity": "", "reply": defense}], "winner": "", "scores": {}}
     jsave(path, b)
-    fighter = cfg("BOUT_FIGHTER_MODEL", "sonnet")
+    fighter = cfg("BOUT_FIGHTER_MODEL", "opus")
     for n in range(2, (rounds or cfg_int("BOUT_ROUNDS", 2)) + 1):
         hist = "\n".join(f"Round {i + 1}. {a_name}: {r['text']}\n{b_name}: {r['reply']}" for i, r in enumerate(b["rounds"]))
         att = llm(f"bout:{bid}:a{n}", f"""You argue for {a_name} in a dispute about: {subject}. {context}

@@ -14,9 +14,9 @@ Ask with the interactive question tool, recommended option first:
      but one account's 5-hour window went from 0% to 97% in 39 minutes, so it cannot carry a whole crowd.
      `TESTER=codex CODEX_EFFORT=max`.
 2. **Characters on Codex** (picked before launch, written as `- **Engine**: codex` on their cards):
-   - **3-5 characters (Recommended):** the boundary tester, long command-heavy days, short regression checks.
-     Size it to the Codex quota you have.
-   - None.
+   - **None (Recommended).** Claude by default: Sonnet drives every screen, Opus does every other step.
+   - 3-5 characters: the boundary tester, long command-heavy days, short regression checks. Size it to the
+     Codex quota you have.
 3. **When an engine hits its usage limit:**
    - **Pause that character and retry after RETRY_PRIMARY_MIN (Recommended).** Nothing is paid twice.
    - Hand the day to a fallback engine (`FALLBACK_TESTER`). The day continues from its report, in a new

@@ -59,7 +59,7 @@ try_unread() {  # try_unread <current>: activate an unread Claude account and ke
     [ "$a" = "$cur" ] && continue
     read -r _ AP AW AST < <(row "$a"); [ "${AST:-}" = ok ] && continue
     $CAAM activate claude "$a" >/dev/null 2>&1 || continue
-    r=$(cd /tmp && timeout 90 claude -p --model "${CLAUDE_PROBE_MODEL:-haiku}" --setting-sources project --strict-mcp-config \
+    r=$(cd /tmp && timeout 90 claude -p --model "${CLAUDE_PROBE_MODEL:-opus}" --setting-sources project --strict-mcp-config \
           "reply with the single word ok" < /dev/null 2>&1 | tail -1)
     if [ "$r" = ok ]; then echo "$a"; return 0; fi
     log "claude: $a refused a test call (${r:0:80}); back to $cur"; $CAAM activate claude "$cur" >/dev/null 2>&1

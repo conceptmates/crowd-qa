@@ -13,7 +13,7 @@ nine agents and re-tested by their reporters, into steps crowd.py tracks on disk
 3. **review**: a fresh agent that sees the diff and the issues, never the fixer's notes
    (`templates/review-brief.md`). `changes` sends the comments back to the fixer, up to `REVIEW_ROUNDS`.
 4. **bout**: a fixer sure a blocker or major comment is wrong answers it under `rebuttals`. The comment and the
-   answer go to a bout (more rounds between two fresh Sonnet fighters, then an Opus judge on a written rubric).
+   answer go to a bout (more rounds between two fresh Opus fighters, then an Opus judge on a written rubric).
    If the fixer wins, the comment is dropped and the next review is told not to raise it again. Bouts also settle a
    bug another character could not reproduce, before it is filed. At most `BOUT_MAX` a day; `state/bouts/<id>.json`.
 5. **recheck**: a fresh agent plays each reporter from their card and diary, repeats their steps on the fix branch,
