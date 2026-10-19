@@ -244,6 +244,16 @@ const POST_OFFICE = V(33, 0, -24);
   ZONES.post.lbl.element.classList.add("click");
   ZONES.post.lbl.element.addEventListener("click", ev => { ev.stopPropagation(); showPost() });
 }
+// watchtower: the lookout is fix-watch.py; it stands on the platform while the watch runs
+const TOWER = V(16, 0, -12);
+{
+  const g = zone("watch", "Watchtower", TOWER.x, TOWER.z, V(10, 0, -8), () => ({pos: V(TOWER.x, 5.6, TOWER.z), yaw: Math.PI}), 11);
+  for (const [lx, lz] of [[-1.4, -1.4], [1.4, -1.4], [-1.4, 1.4], [1.4, 1.4]]) box(g, [0.35, 5.4, 0.35], [lx, 2.7, lz], {color: C.darkwood});
+  box(g, [3.6, 0.3, 3.6], [0, 5.45, 0], {color: C.wood});
+  for (const [w, d, x, z] of [[3.6, 0.15, 0, 1.75], [3.6, 0.15, 0, -1.75], [0.15, 3.6, 1.75, 0], [0.15, 3.6, -1.75, 0]]) box(g, [w, 0.9, d], [x, 6, z], {color: C.wood});
+  mesh(g, CONE4, "#2d9cdb", [4.4, 2, 4.4], [0, 9.2, 0], {ry: Math.PI / 4});
+  for (const px of [-1.5, 1.5]) box(g, [0.2, 3, 0.2], [px, 7.2, 1.5], {color: C.darkwood});
+}
 // yards beside the workshop and the booth, where finished jobs stand
 const YARDS = {};
 for (const [k, x, z] of [["workshop", 2 - 22 + 3.9, 30 - 6.5], ["booth", 20 + 9.5 + 3.9, 30 - 6.5]]) {
@@ -550,12 +560,16 @@ function boat(pr, i) {
   b.pr = pr;
   const st = String(pr.status || "").toLowerCase();
   const out = ["open", "draft", "merged", "ready"].includes(st);
-  const dock = V(55.2 + (i % 2) * 5, 0, -6 + Math.floor(i / 2) * 4.4 + (i % 2) * 2.2), sea = V(st === "merged" ? 76 : 60 + (i % 3) * 5, 0, -22 + i * 6);
+  // docked boats: two staggered columns; at sea: three lanes, each boat its own row, so no two tags meet
+  const dock = V(55.2 + (i % 2) * 5, 0, -6 + Math.floor(i / 2) * 4.4 + (i % 2) * 2.2),
+    sea = V(st === "merged" ? 80 : 60 + (i % 3) * 7, 0, -24 + i * 4.2);
   const to = out ? sea : dock;
   b.flag.material = mat({open: "#23a55a", draft: "#9aa1b1", merged: "#8957e5", closed: "#e5484d"}[st] || "#cccccc");
   b.sail.material = mat(st === "draft" ? "#e6e8ee" : "#ffffff");
   const rc = pr.recheck || {};
-  b.lbl.element.innerHTML = `${pr.number ? "#" + esc(pr.number) + " " : ""}${esc(clip(pr.area, 16))} · ${esc(st || "?")}${(rc.pass || rc.partial || rc.fail) ? ` · ✅${rc.pass || 0} 🟨${rc.partial || 0} ❌${rc.fail || 0}` : ""}`;
+  const stageIc = {fixing: "🔨", reviewing: "🔍", rechecking: "🔁", done: "✅", "needs-human": "⚠️"}[pr.stage] || "";
+  b.lbl.element.title = `${pr.area} · ${pr.stage || st || "?"}`;
+  b.lbl.element.innerHTML = `${pr.number ? "#" + esc(pr.number) : esc(clip(pr.area, 10))} ${stageIc}${(rc.pass || rc.partial || rc.fail) ? ` · ✅${rc.pass || 0} 🟨${rc.partial || 0} ❌${rc.fail || 0}` : ""}`;
   if (!b.to.equals(to)) {
     if (first) { b.g.position.copy(to); b.from.copy(to) } else b.from.copy(b.g.position);
     b.to.copy(to);
@@ -630,7 +644,8 @@ function zoneCounts(S, liveBout, bout) {
   const [fr, fq, fd] = jobs("fix"), [rr, rq, rd] = jobs("review");
   const n = st => S.characters.filter(c => c.status === st).length;
   const sub = {product: `${n("testing")} testing${n("rechecking") ? ` · ${n("rechecking")} re-testing` : ""}`, bench: `${by.bench || 0} waiting`, court: `${by.court || 0} being judged`,
-    houses: `${by.houses || 0} done for the day`, workshop: `${fr} fixing${fq ? ` · ${fq} waiting` : ""}${fd ? ` · ${fd} done` : ""}`,
+    houses: `${by.houses || 0} done for the day`, watch: (S.watch || {}).on ? `${((S.watch || {}).problems || []).length || "no"} open problems` : "off duty",
+    workshop: `${fr} fixing${fq ? ` · ${fq} waiting` : ""}${fd ? ` · ${fd} done` : ""}`,
     booth: `${rr} reviewing${rq ? ` · ${rq} waiting` : ""}${rd ? ` · ${rd} done` : ""}`,
     arena: bout ? (bout.winner ? "last bout: " + clip(bout.winner, 16) + " won" : clip(bout.subject || bout.kind || "bout", 26)) : "no bout", harbour: `${S.prs.length} PR${S.prs.length === 1 ? "" : "s"}`,
     post: `${S.bugs.filter(b => ["filed", "in-pr"].includes(b.state)).length} filed`, plaza: `${S.posts.length} posts`};
@@ -718,6 +733,14 @@ function apply(next) {
     });
   }
   for (const k of [...npcs.keys()]) if (k.startsWith("job:") && !live.has(k)) { npcs.get(k).dispose(); npcs.delete(k) }
+  { // the lookout
+    const w = S.watch || {}, n = (w.problems || []).length;
+    const f = npc("watch", {id: "watch", color: "#2d9cdb", name: "Watch"});
+    f.watch = true;
+    f.setTag(`<span class="ic">${w.on ? (n ? "⚠️" : "👁️") : "💤"}</span>Watch${n ? ` · ${n}` : w.on ? " · all quiet" : " · off"}`);
+    if (f.slotKey !== "tower") { const s = ZONES.watch.slot(0); f.place(s.pos, s.yaw, "idle"); f.slotKey = "tower" }
+    f.anim = n ? "wait" : "idle";
+  }
   setBout(bout, bout === liveBout);
   S.prs.forEach((pr, i) => boat(pr, i));
   for (const [area, b] of boats) if (!S.prs.some(p => p.area === area)) { scene.remove(b.g); b.lbl.element.remove(); boats.delete(area) }
@@ -756,6 +779,7 @@ function select(f, refresh) {
   if (f.tag) f.tag.element.classList.add("sel");
   if (f.data) return showChar(f.data);
   if (f.job) return showJob(f.job);
+  if (f.watch) return showWatch();
   if (f === judge && arena.bout) return showBout(arena.bout);
   if (f.id && !refresh && S) { const b = S.bouts.find(x => x.a === f.id || x.b === f.id); if (b) return showBout(b) }
   if (f === crier) return openCard(`<h2><i style="background:#faa61a"></i>Organisers</h2><div class="sub">Notices to the whole town</div>` +
@@ -778,6 +802,12 @@ function showJob(j) {
     <div class="kv"><span>Job</span><span>${esc(j.id)}</span><span>Model</span><span>${esc(j.model || "—")}</span><span>Runner</span><span>${esc(j.runner || "—")}</span>
     <span>Persona</span><span>${esc(j.persona || "—")}</span><span>Started</span><span>${esc(j.started || "—")}</span></div>
     <div class="act">${url ? `<a class="go" href="${esc(url)}" target="_blank" rel="noopener">Open thread</a>` : `<button disabled>No thread yet</button>`}</div>`);
+}
+function showWatch() {
+  const w = S.watch || {};
+  openCard(`<h2><i style="background:#2d9cdb"></i>The watch</h2><div class="sub">${w.on ? "on duty, checks every minute without a model call" : "off duty: fix-watch.py is not running"}</div>
+    <h3>Open problems · ${(w.problems || []).length}</h3>${(w.problems || []).map(p => `<div class="post"><span class="k">${esc(p.kind)}</span><span class="t">${esc(p.at)}</span>${esc(clip(p.text, 200))}</div>`).join("") || `<div class="post">All quiet.</div>`}
+    <h3>Last reports</h3>${(w.recent || []).slice().reverse().map(l => `<div class="post">${esc(clip(l, 220))}</div>`).join("") || `<div class="post">Nothing reported yet.</div>`}`);
 }
 function showBoat(area) {
   const b = boats.get(area);

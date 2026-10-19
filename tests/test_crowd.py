@@ -1093,7 +1093,8 @@ class SquareView(unittest.TestCase):
              "bugs": {"key", "title", "severity", "reporter", "confirmers", "state", "url", "area"},
              "jobs": {"id", "role", "area", "status", "runner", "model", "thread", "persona", "started"},
              "bouts": {"id", "kind", "a", "b", "subject", "rounds", "winner", "scores", "status"},
-             "prs": {"area", "url", "number", "status", "bugs", "recheck"}}
+             "prs": {"area", "url", "number", "status", "stage", "bugs", "recheck"},
+             "watch": {"on", "problems", "recent"}}
 
     def render(self, r):
         res = subprocess.run(["python3", os.path.join(SKILL, "scripts", "square-view.py"), r.dir], capture_output=True, text=True, timeout=60)
@@ -1102,9 +1103,10 @@ class SquareView(unittest.TestCase):
 
     def assertShape(self, st):
         self.assertEqual(set(st), set(self.SHAPE))
-        self.assertTrue(self.SHAPE["run"] <= set(st["run"]))
+        for one in ("run", "watch"):          # objects, not lists
+            self.assertTrue(self.SHAPE[one] <= set(st[one]))
         for k, keys in self.SHAPE.items():
-            for item in ([] if k == "run" else st[k]):
+            for item in ([] if k in ("run", "watch") else st[k]):
                 self.assertTrue(keys <= set(item), f"{k}: missing {keys - set(item)}")
 
     def test_state_json_from_every_pipeline_source(self):
