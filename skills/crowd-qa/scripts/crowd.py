@@ -1667,13 +1667,15 @@ def run_cli_job(j):
     except RuntimeError as e:
         return job_fail(j["id"], str(e))
     model = j["model"] if j["model"] != "auto" else {"fix": "opus", "review": "", "recheck": "sonnet"}[j["role"]]
-    engine = cfg("REVIEW_ENGINE", "codex" if shutil.which("codex") else "claude") if j["role"] == "review" else "claude"
+    engine = cfg("REVIEW_ENGINE", "claude") if j["role"] == "review" else "claude"
     if ":" in model:
         engine, model = model.split(":", 1)
+    if model == "default":  # the label a run with no model left behind; codex rejects -m default
+        model = ""
     elif re.search(r"opus|sonnet|haiku|fable|claude", model or ""):
         engine = "claude"
     if engine == "claude" and not model:
-        model = "sonnet" if j["role"] == "review" else "opus"
+        model = "opus"
     prompt = read(j["prompt"])
     if engine == "codex":
         cmd = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "-C", cwd,

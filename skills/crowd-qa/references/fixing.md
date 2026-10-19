@@ -75,8 +75,9 @@ For each job:
 `FIX_MODEL`, `REVIEW_MODEL` and `RECHECK_MODEL` set to `instance:model` are used as given. `auto` means: read
 `orchestrator_capabilities` once at the start and pick from the live catalog:
 - fixer: the newest Opus (effort high), else the strongest model listed;
-- reviewer: a model from a **different provider** than the fixer when one can run child tasks (Codex, effort
-  high): a second model family catches what the first one misses. Else Sonnet on another account;
+- reviewer: Claude Opus in a fresh session that never saw the fixer's reasoning (the default since a run whose
+  Codex reviews all failed on a model name and a usage limit). Set `REVIEW_ENGINE=codex` or
+  `REVIEW_MODEL=codex:<model>` to ask a second model family instead;
 - re-checker: Sonnet (it drives a browser for a long time; Opus is not needed to play a user);
 - spread jobs over every Claude instance listed (round-robin), so one account's usage limit does not stop the
   run. A job that dies on a limit: `jobs fail <id> limit`, and launch the retry on the next instance.
