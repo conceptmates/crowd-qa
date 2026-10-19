@@ -263,14 +263,22 @@ def world_state(run, data):
             res = next((w for w in ("fail", "partial", "pass") if w in words), "")
         jobs[-1]["result"] = result_word(res) if j.get("role") == "recheck" else ""
     prs = []
+    live = read(f"{s}/areas-detail.json", {}) or {}
     for pr in as_list(read(f"{s}/prs.json", {}), "area"):
+        if live and pr.get("area") not in live:   # an area taken out of the fix stage (FIX_TRACKERS) sails no boat
+            continue
         rc = pr.get("recheck") if isinstance(pr.get("recheck"), dict) else {}
         if not rc:   # not written yet: count the finished recheck jobs for this area
             for j in jobs:
                 if j["role"] == "recheck" and j["area"] == pr.get("area") and j["result"]:
                     rc[j["result"]] = rc.get(j["result"], 0) + 1
-        prs.append({"area": pr.get("area", ""), "url": pr.get("url", ""), "number": pr.get("number", ""),
-                    "status": pr.get("status", ""), "bugs": pr.get("bugs") or [],
+        url = pr.get("url") or (live.get(pr.get("area")) or {}).get("pr", "")   # the area can know its PR first
+        num = pr.get("number") or (re.search(r"/pull/(\d+)", url or "") or [None, ""])[1]
+        st = pr.get("status", "")
+        if st not in ("open", "draft", "merged", "closed", "ready"):   # an area status written here earlier
+            st = "draft" if num else ""
+        prs.append({"area": pr.get("area", ""), "url": url, "number": num, "status": st,
+                    "stage": (live.get(pr.get("area")) or {}).get("status", ""), "bugs": pr.get("bugs") or [],
                     "recheck": {k: rc.get(k, 0) for k in ("pass", "partial", "fail")}})
     bouts = []
     for p in sorted(glob.glob(f"{s}/bouts/*.json"), key=os.path.getmtime):
@@ -305,7 +313,18 @@ def world_state(run, data):
                     "stage": stage(run, people, jobs, prs, areas), "updated": time.strftime("%Y-%m-%dT%H:%M:%S")},
             "characters": chars, "posts": posts, "bugs": bugs,
             "jobs": [{k: v for k, v in j.items() if k != "result"} | ({"result": j["result"]} if j["result"] else {}) for j in jobs],
-            "bouts": bouts, "prs": prs}
+            "bouts": bouts, "prs": prs, "watch": watch_state(run)}
+
+
+def watch_state(run):
+    """fix-watch.py's open problems (state/watch.json) and its last lines (logs/fix-watch.log) for the lookout."""
+    seen = read(f"{run}/state/watch.json", {}) or {}
+    open_ = [{"kind": k.split(" ", 1)[0], "text": k.split(" ", 1)[1] if " " in k else "",
+              "at": time.strftime("%H:%M", time.localtime(v))} for k, v in seen.items()
+             if not k.startswith("_") and isinstance(v, (int, float)) and not k.startswith(("READY", "DONE"))]
+    lines = (read(f"{run}/logs/fix-watch.log", "") or "").splitlines()
+    on = os.path.exists(f"{run}/state/watch.json") and time.time() - os.path.getmtime(f"{run}/state/watch.json") < 300
+    return {"on": on, "problems": open_, "recent": [l for l in lines if l.strip()][-8:]}
 
 
 PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><title>crowd · square</title>
