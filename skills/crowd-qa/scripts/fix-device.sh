@@ -24,7 +24,7 @@ host_of() { for kv in ${DEVICE_HOSTS:-}; do [ "${kv%%=*}" = "$1" ] && { echo "${
 platform_of() { case "$1" in emulator-*|*:*) echo android;; *) echo ios;; esac; }
 on() {  # on <host> <command>: runs locally when host is empty
   local h="$1"; shift
-  if [ -z "$h" ]; then bash -c "$*"; else ssh -o ServerAliveInterval=15 "$h" "export PATH=/opt/homebrew/bin:/usr/local/bin:\$HOME/Library/Android/sdk/platform-tools:\$HOME/Android/Sdk/platform-tools:\$PATH; $*"; fi
+  if [ -z "$h" ]; then bash -c "$*"; else ssh -o ServerAliveInterval=15 "$h" "export PATH=/opt/homebrew/bin:/usr/local/bin:\$HOME/.local/bin:\$HOME/Library/Android/sdk/platform-tools:\$HOME/Android/Sdk/platform-tools:\$PATH; $*"; fi
 }
 install_on() {  # install_on <device> <path on the device's host>
   local dev="$1" p="$2" h; h=$(host_of "$1")
@@ -39,6 +39,8 @@ exports() { echo "export DEVICE=$1 CROWD_DEVICE_HOST=$(host_of "$1") AGENT_DEVIC
 
 case "$CMD" in
   claim)
+    st=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],{}).get('status',''))" "$RUN/state/jobs.json" "$JOB" 2>/dev/null)
+    case "$st" in done|failed) echo "$JOB is $st: it may not take a device" >&2; exit 1;; esac
     dev=$(mine); [ -n "$dev" ] && { exports "$dev"; exit 0; }
     want="${FIX_DEVICE_PLATFORM:-any}"
     for i in $(seq 1 $(( ${FIX_DEVICE_WAIT_S:-3600} / 20 ))); do
@@ -80,6 +82,8 @@ case "$CMD" in
     echo "installed on $dev; open the app again (agent-device open ${APP_ID:-<app id>} --relaunch)" ;;
   release)
     dev=$(mine); [ -n "$dev" ] || exit 0
+    # close the job's agent-device session: a session left open keeps holding the device after the lock is gone
+    on "$(host_of "$dev")" "agent-device close --session fix-$JOB" >> "$LOG" 2>&1 || true
     if [ -f "$D/$dev.built" ]; then
       base=$( [ "$(platform_of "$dev")" = ios ] && echo "${APP_PATH:-}" || echo "${ANDROID_APP_PATH:-}" )
       if [ -n "$base" ] && install_on "$dev" "$base" >> "$LOG" 2>&1; then rm -f "$D/$dev.built"

@@ -670,18 +670,22 @@ class Fixing(unittest.TestCase):
         json.dump(jobs, open(os.path.join(run, "state/jobs.json"), "w"))
         json.dump({"a": {"status": "fixing"}, "b": {"status": "reviewing"}}, open(os.path.join(run, "state/areas-detail.json"), "w"))
         open(os.path.join(run, "fix/devices/emulator-5554"), "w").write("recheck-c-1\n")
+        os.utime(os.path.join(run, "fix/devices/emulator-5554"), (old, old))   # a fresh lock is never reported
+        open(os.path.join(run, "fix/devices/emulator-5556"), "w").write("recheck-d-1\n")   # this one is fresh
         watch = lambda: subprocess.run([sys.executable, os.path.join(SKILL, "scripts", "fix-watch.py"), run],
                                        capture_output=True, text=True, timeout=60).stdout
         out = watch()
         self.assertIn("READY 1 of 1 queued jobs can start", out)
         self.assertIn("STALLED fix-a-1", out)
         self.assertIn("LOCK fix/devices/emulator-5554 is held by recheck-c-1", out)
+        self.assertNotIn("emulator-5556", out, "a lock under 2 minutes old may belong to a job not registered yet")
         self.assertNotIn("STALLED", watch(), "a problem already reported is not repeated within 10 minutes")
         for j in jobs.values():
             j["status"] = "done"
         json.dump(jobs, open(os.path.join(run, "state/jobs.json"), "w"))
         json.dump({"a": {"status": "done"}, "b": {"status": "needs-human"}}, open(os.path.join(run, "state/areas-detail.json"), "w"))
         os.remove(os.path.join(run, "fix/devices/emulator-5554"))
+        os.remove(os.path.join(run, "fix/devices/emulator-5556"))
         self.assertIn("DONE 1 areas done, 1 need a person", watch())
 
     def test_a_job_without_a_valid_result_is_tried_again_then_left_to_a_person(self):

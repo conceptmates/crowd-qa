@@ -181,7 +181,7 @@ const HOUSES = [[-41, 27], [-32, 27], [-23, 27], [-41, 40], [-32, 40], [-23, 40]
 {
   const g = zone("houses", "Houses", 0, 0, V(-17, 0, 22), i => {
     const [hx, hz] = HOUSES[i % HOUSES.length], k = Math.floor(i / HOUSES.length);
-    return {pos: V(hx - 2.4 + (k % 3) * 2.4, 0, hz + 4 + (k % 3) * 1.5 + Math.floor(k / 3) * 4.5), yaw: 0.25 - (k % 3) * 0.25};
+    return {pos: V(hx - 2.6 + (k % 3) * 2.6, 0, hz + 4 + (k % 3) * 2.2 + Math.floor(k / 3) * 6.6), yaw: 0.25 - (k % 3) * 0.25};
   });
   ZONES.houses.lbl.position.set(-32, 9.5, 27);
   const walls = ["#f8e6c8", "#ffd8b0", "#dbeeff", "#e9f7d9", "#ffe0ea", "#efe4ff"], roofs = [C.red, "#4a90d9", C.green, "#e08a3c", "#c0577a", "#7b68c9"];
@@ -245,9 +245,10 @@ const POST_OFFICE = V(33, 0, -24);
   ZONES.post.lbl.element.addEventListener("click", ev => { ev.stopPropagation(); showPost() });
 }
 // watchtower: the lookout is fix-watch.py; it stands on the platform while the watch runs
-const TOWER = V(34, 0, 16);   // open ground between the arena and the review booth, looking over the harbour
+const TOWER = V(36, 0, 32);   // past the review booth at the water's edge, clear of the arena and the boats
 {
-  const g = zone("watch", "Watchtower", TOWER.x, TOWER.z, V(26, 0, 12), () => ({pos: V(TOWER.x, 5.6, TOWER.z), yaw: 0}), 11);
+  const g = zone("watch", "Watchtower", TOWER.x, TOWER.z, V(30, 0, 22), () => ({pos: V(TOWER.x, 5.6, TOWER.z), yaw: 0}), 11);
+  path(V(30, 0, 22), V(TOWER.x - 2, 0, TOWER.z - 2), 2.4);
   for (const [lx, lz] of [[-1.4, -1.4], [1.4, -1.4], [-1.4, 1.4], [1.4, 1.4]]) box(g, [0.35, 5.4, 0.35], [lx, 2.7, lz], {color: C.darkwood});
   box(g, [3.6, 0.3, 3.6], [0, 5.45, 0], {color: C.wood});
   for (const [w, d, x, z] of [[3.6, 0.15, 0, 1.75], [3.6, 0.15, 0, -1.75], [0.15, 3.6, 1.75, 0], [0.15, 3.6, -1.75, 0]]) box(g, [w, 0.9, d], [x, 6, z], {color: C.wood});
@@ -255,9 +256,10 @@ const TOWER = V(34, 0, 16);   // open ground between the arena and the review bo
   for (const px of [-1.5, 1.5]) box(g, [0.2, 3, 0.2], [px, 7.2, 1.5], {color: C.darkwood});
 }
 // bank: what each engine's usage limit has left, and what the run has spent
-const BANK = V(-8, 0, 17);
+const BANK = V(24, 0, -40);   // behind the product building, between it and the post office
 {
-  const g = zone("bank", "Bank", BANK.x, BANK.z, V(-5, 0, 12), () => ({pos: V(BANK.x, 0, BANK.z + 4), yaw: 0}), 9);
+  const g = zone("bank", "Bank", BANK.x, BANK.z, V(22, 0, -12), () => ({pos: V(BANK.x, 0, BANK.z + 4), yaw: 0}), 9);
+  path(V(22, 0, -12), V(BANK.x - 1, 0, BANK.z + 4), 2.4);
   box(g, [7, 0.5, 5.4], [0, 0.25, 0], {color: C.stone});
   box(g, [6.4, 4, 4.4], [0, 2.5, -0.3], {color: "#f3ead6"});
   for (let i = 0; i < 4; i++) mesh(g, CYL, "#fffaf0", [0.5, 3.8, 0.5], [-2.4 + i * 1.6, 2.4, 2.2]);
@@ -596,14 +598,14 @@ function boat(pr, i) {
   const out = ["open", "draft", "merged", "ready"].includes(st);
   // docked boats: two staggered columns; at sea: three lanes, each boat its own row, so no two tags meet
   const dock = V(55.2 + (i % 2) * 5, 0, -6 + Math.floor(i / 2) * 4.4 + (i % 2) * 2.2),
-    sea = V(st === "merged" ? 80 : 60 + (i % 3) * 7, 0, -24 + i * 4.2);
+    sea = V(st === "merged" ? 84 : 60 + (i % 3) * 8, 0, -26 + i * 5.5);
   const to = out ? sea : dock;
   b.flag.material = mat({open: "#23a55a", draft: "#9aa1b1", merged: "#8957e5", closed: "#e5484d"}[st] || "#cccccc");
   b.sail.material = mat(st === "draft" ? "#e6e8ee" : "#ffffff");
   const rc = pr.recheck || {};
   const stageIc = {fixing: "🔨", reviewing: "🔍", rechecking: "🔁", done: "✅", "needs-human": "⚠️"}[pr.stage] || "";
   b.lbl.element.title = `${pr.area} · ${pr.stage || st || "?"}`;
-  b.lbl.element.innerHTML = `${pr.number ? "#" + esc(pr.number) : esc(clip(pr.area, 10))} ${stageIc}${(rc.pass || rc.partial || rc.fail) ? ` · ✅${rc.pass || 0} 🟨${rc.partial || 0} ❌${rc.fail || 0}` : ""}`;
+  b.lbl.element.innerHTML = `${pr.number ? "#" + esc(pr.number) : esc(clip(pr.area, 10))} ${stageIc}${rc.pass ? ` ✅${rc.pass}` : ""}${rc.partial ? ` 🟨${rc.partial}` : ""}${rc.fail ? ` ❌${rc.fail}` : ""}`;
   if (!b.to.equals(to)) {
     if (first) { b.g.position.copy(to); b.from.copy(to) } else b.from.copy(b.g.position);
     b.to.copy(to);
@@ -713,7 +715,7 @@ function apply(next) {
     if (!f) { f = new Figure({id: c.id, color: c.color || "#5865f2", name: c.name}); chars.set(c.id, f) }
     f.data = c;
     const rj = recheck[c.id], badge = rj && rj.result ? `<span class="badge ${esc(rj.result)}">${esc(rj.result.toUpperCase())}</span>` : "";
-    f.setTag(`<i style="background:${esc(c.color)}"></i>${esc(String(c.name).split(" ")[0])}<span class="ic">${ICON[c.status] || ""}</span>${c.bugs ? `<span class="ic">🐞${c.bugs}</span>` : ""}${badge}`);
+    f.setTag(`<i style="background:${esc(c.color)}"></i>${esc(String(c.name).split(" ")[0])}<span class="ic">${c.status === "done" ? "" : ICON[c.status] || ""}</span>${c.bugs ? `<span class="ic">🐞${c.bugs}</span>` : ""}${badge}`);
     const z = charZone(c, liveBout);
     const i = slots[z] = (slots[z] ?? -1) + 1;
     const key = z + ":" + (z === "arena" ? (c.id === liveBout.a ? 0 : 1) : i);
