@@ -245,14 +245,26 @@ const POST_OFFICE = V(33, 0, -24);
   ZONES.post.lbl.element.addEventListener("click", ev => { ev.stopPropagation(); showPost() });
 }
 // watchtower: the lookout is fix-watch.py; it stands on the platform while the watch runs
-const TOWER = V(16, 0, -12);
+const TOWER = V(34, 0, 16);   // open ground between the arena and the review booth, looking over the harbour
 {
-  const g = zone("watch", "Watchtower", TOWER.x, TOWER.z, V(10, 0, -8), () => ({pos: V(TOWER.x, 5.6, TOWER.z), yaw: Math.PI}), 11);
+  const g = zone("watch", "Watchtower", TOWER.x, TOWER.z, V(26, 0, 12), () => ({pos: V(TOWER.x, 5.6, TOWER.z), yaw: 0}), 11);
   for (const [lx, lz] of [[-1.4, -1.4], [1.4, -1.4], [-1.4, 1.4], [1.4, 1.4]]) box(g, [0.35, 5.4, 0.35], [lx, 2.7, lz], {color: C.darkwood});
   box(g, [3.6, 0.3, 3.6], [0, 5.45, 0], {color: C.wood});
   for (const [w, d, x, z] of [[3.6, 0.15, 0, 1.75], [3.6, 0.15, 0, -1.75], [0.15, 3.6, 1.75, 0], [0.15, 3.6, -1.75, 0]]) box(g, [w, 0.9, d], [x, 6, z], {color: C.wood});
   mesh(g, CONE4, "#2d9cdb", [4.4, 2, 4.4], [0, 9.2, 0], {ry: Math.PI / 4});
   for (const px of [-1.5, 1.5]) box(g, [0.2, 3, 0.2], [px, 7.2, 1.5], {color: C.darkwood});
+}
+// bank: what each engine's usage limit has left, and what the run has spent
+const BANK = V(-8, 0, 17);
+{
+  const g = zone("bank", "Bank", BANK.x, BANK.z, V(-5, 0, 12), () => ({pos: V(BANK.x, 0, BANK.z + 4), yaw: 0}), 9);
+  box(g, [7, 0.5, 5.4], [0, 0.25, 0], {color: C.stone});
+  box(g, [6.4, 4, 4.4], [0, 2.5, -0.3], {color: "#f3ead6"});
+  for (let i = 0; i < 4; i++) mesh(g, CYL, "#fffaf0", [0.5, 3.8, 0.5], [-2.4 + i * 1.6, 2.4, 2.2]);
+  box(g, [7.2, 0.5, 5.6], [0, 4.7, 0], {color: "#e7dcc3"});
+  mesh(g, CONE4, "#d4a017", [7.6, 1.6, 5.8], [0, 5.75, 0], {ry: Math.PI / 4});
+  box(g, [2.4, 0.9, 0.2], [0, 4.1, 2.75], {color: "#d4a017"});   // sign
+  box(g, [1.3, 2.4, 0.15], [0, 1.7, 1.95], {color: C.darkwood});
 }
 // yards beside the workshop and the booth, where finished jobs stand
 const YARDS = {};
@@ -326,6 +338,13 @@ const HAIR = ["#2b1d14", "#4a3020", "#151515", "#7a4a22", "#c9a35a", "#5b5b5b"].
 const PANTS = mat("#3b4559"), EYE = mat("#1b1e26");
 const FIG = 1.5;   // figures are drawn at 1.5x so they read next to the buildings
 const pickables = [];
+{ // the bank opens the usage card
+  const hit = new THREE.Mesh(BOX, new THREE.MeshBasicMaterial({visible: false}));
+  hit.scale.set(8, 7, 6); hit.position.set(BANK.x, 3.5, BANK.z); hit.userData.bank = true;
+  scene.add(hit); pickables.push(hit);
+  ZONES.bank.lbl.element.classList.add("click");
+  ZONES.bank.lbl.element.addEventListener("click", ev => { ev.stopPropagation(); showBank() });
+}
 { // the post office opens the list of filed issues
   const hit = new THREE.Mesh(BOX, new THREE.MeshBasicMaterial({visible: false}));
   hit.scale.set(9, 8, 8); hit.position.set(POST_OFFICE.x, 4, POST_OFFICE.z - 1); hit.userData.post = true;
@@ -417,6 +436,7 @@ class Figure {
       case "hammer": aR = -2.6 + Math.abs(Math.sin(t * 5 + this.phase)) * 2.1; aL = -0.7; head = -0.25; break;
       case "inspect": aR = -1.4; aL = -0.5; head = Math.sin(t * 1.4 + this.phase) * 0.6; break;
       case "wait": zL = 0.25; zR = -0.25; y = Math.sin(t * 2 + this.phase) * 0.02; head = Math.sin(t * 0.9 + this.phase) * 0.35; break;
+      case "sleep": lL = lR = -1.5; y = -0.12; aL = aR = -0.15; tilt = -0.35; head = 0.5 + Math.sin(t * 0.6 + this.phase) * 0.05; break;
       case "crossed": aL = aR = -1.3; zL = 0.75; zR = -0.75; break;
       case "cheer": aL = aR = -2.9 + Math.sin(t * 8) * 0.15; zL = -0.25; zR = 0.25; y = Math.abs(Math.sin(t * 6)) * 0.35; break;
       case "fight": aL = aR = -1.5; zL = -0.3; zR = 0.3; y = Math.abs(Math.sin(t * 6 + this.phase)) * 0.08; lL = 0.25; lR = -0.25; break;
@@ -644,7 +664,8 @@ function zoneCounts(S, liveBout, bout) {
   const [fr, fq, fd] = jobs("fix"), [rr, rq, rd] = jobs("review");
   const n = st => S.characters.filter(c => c.status === st).length;
   const sub = {product: `${n("testing")} testing${n("rechecking") ? ` · ${n("rechecking")} re-testing` : ""}`, bench: `${by.bench || 0} waiting`, court: `${by.court || 0} being judged`,
-    houses: `${by.houses || 0} done for the day`, watch: (S.watch || {}).on ? `${((S.watch || {}).problems || []).length || "no"} open problems` : "off duty",
+    houses: `${by.houses || 0} done for the day`, bank: Object.entries((S.usage || {}).engines || {}).map(([e, x]) => `${e} ${x.paused ? "💤 paused" : x.primary}`).join(" · ") || "no quota guard",
+    watch: (S.watch || {}).on ? `${((S.watch || {}).problems || []).length || "no"} open problems` : "off duty",
     workshop: `${fr} fixing${fq ? ` · ${fq} waiting` : ""}${fd ? ` · ${fd} done` : ""}`,
     booth: `${rr} reviewing${rq ? ` · ${rq} waiting` : ""}${rd ? ` · ${rd} done` : ""}`,
     arena: bout ? (bout.winner ? "last bout: " + clip(bout.winner, 16) + " won" : clip(bout.subject || bout.kind || "bout", 26)) : "no bout", harbour: `${S.prs.length} PR${S.prs.length === 1 ? "" : "s"}`,
@@ -741,6 +762,18 @@ function apply(next) {
     if (f.slotKey !== "tower") { const s = ZONES.watch.slot(0); f.place(s.pos, s.yaw, "idle"); f.slotKey = "tower" }
     f.anim = n ? "wait" : "idle";
   }
+  // an engine paused at its usage limit: everyone working on it sleeps until it is back
+  const eng = (S.usage || {}).engines || {}, asleep = e => !!(eng[e] && eng[e].paused);
+  for (const f of chars.values()) {
+    const z = f.data && asleep(f.data.engine) && f.data.status === "testing";
+    if (z) { f.anim = "sleep"; f.tag.element.classList.add("zz") } else f.tag.element.classList.remove("zz");
+  }
+  for (const [k, f] of npcs) {
+    if (!k.startsWith("job:") || !f.job) continue;
+    const e = String(f.job.model || "claude").split(":")[0], z = f.job.status === "running" && asleep(e);
+    if (z) f.anim = "sleep";
+    f.tag.element.classList.toggle("zz", z);
+  }
   setBout(bout, bout === liveBout);
   S.prs.forEach((pr, i) => boat(pr, i));
   for (const [area, b] of boats) if (!S.prs.some(p => p.area === area)) { scene.remove(b.g); b.lbl.element.remove(); boats.delete(area) }
@@ -802,6 +835,17 @@ function showJob(j) {
     <div class="kv"><span>Job</span><span>${esc(j.id)}</span><span>Model</span><span>${esc(j.model || "—")}</span><span>Runner</span><span>${esc(j.runner || "—")}</span>
     <span>Persona</span><span>${esc(j.persona || "—")}</span><span>Started</span><span>${esc(j.started || "—")}</span></div>
     <div class="act">${url ? `<a class="go" href="${esc(url)}" target="_blank" rel="noopener">Open thread</a>` : `<button disabled>No thread yet</button>`}</div>`);
+}
+function showBank() {
+  const u = S.usage || {}, eng = u.engines || {};
+  const bar = v => { const n = parseFloat(v); return isNaN(n) ? `<span class="t">—</span>` : `<span class="bar"><i style="width:${Math.min(100, n)}%;background:${n >= 90 ? "#e5484d" : n >= 70 ? "#f0b232" : "#23a55a"}"></i></span><span class="t">${n}%</span>` };
+  const engHtml = Object.entries(eng).map(([e, x]) => `<h3>${esc(e)}${x.paused ? " · paused, its people are asleep 💤" : ""} · ${esc(x.at || "")}</h3>
+    ${x.accounts.map(a => `<div class="acct"><b>${esc(a.name)}${a.name === x.active ? " ●" : ""}</b><span>5 h</span>${bar(a.primary)}<span>week</span>${bar(a.weekly)}</div>`).join("")}`).join("") || `<div class="post">No quota guard is reporting.</div>`;
+  const top = [...S.jobs].filter(j => j.tokens || j.usd).sort((a, b) => (b.usd || 0) - (a.usd || 0) || (b.tokens || 0) - (a.tokens || 0)).slice(0, 10);
+  openCard(`<h2><i style="background:#d4a017"></i>Bank</h2><div class="sub">$${(u.total_usd || 0).toFixed(2)} of model steps and cli jobs${u.fix_tokens ? ` · ${(u.fix_tokens / 1e6).toFixed(2)}M tokens in subagent jobs` : ""}</div>
+    ${engHtml}
+    <h3>Spent by step</h3><div class="kv">${Object.entries(u.steps || {}).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<span>${esc(k)}</span><span>$${v.toFixed(2)}</span>`).join("")}${u.fix_usd ? `<span>fix jobs (cli)</span><span>$${u.fix_usd.toFixed(2)}</span>` : ""}</div>
+    <h3>Biggest jobs</h3>${top.map(j => `<div class="post"><span class="k">${esc(j.role)}</span>${esc(j.area || j.id)} · ${j.usd ? "$" + j.usd.toFixed(2) : ""}${j.usd && j.tokens ? " · " : ""}${j.tokens ? (j.tokens / 1000).toFixed(0) + "k tokens" : ""}</div>`).join("") || `<div class="post">No job usage recorded yet.</div>`}`);
 }
 function showWatch() {
   const w = S.watch || {};
@@ -870,6 +914,7 @@ renderer.domElement.addEventListener("pointerup", e => {
   if (!hit) { card.hidden = true; select(null); return }
   if (hit.object.userData.boat) showBoat(hit.object.userData.boat);
   else if (hit.object.userData.post) showPost();
+  else if (hit.object.userData.bank) showBank();
   else select(hit.object.userData.fig);
 });
 renderer.domElement.addEventListener("pointermove", e => {
