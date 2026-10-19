@@ -96,7 +96,10 @@ def check(C, seen):
     verify, url = C.get("STACK_VERIFY", ""), C.get("WATCH_URL", "")
     if verify or url:
         cmd = verify or f"curl -sf -o /dev/null --max-time 10 {url}"
-        r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=120)
+        try:
+            r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            r = subprocess.CompletedProcess(cmd, 124, "", "timed out after 120s")
         if r.returncode:
             ev.append(("STACK", f"stack check failed: {(r.stdout + r.stderr).strip().splitlines()[-1:] or ['exit ' + str(r.returncode)]}"))
     q = f"{RUN}/quota.log"
@@ -146,7 +149,12 @@ def main():
     seen = jload(f"{RUN}/state/watch.json", {})
     while True:
         C = cfg()
-        events = check(C, seen)
+        try:
+            events = check(C, seen)
+        except Exception as e:      # a state file caught mid-write, a slow stack check: report it, keep watching
+            import traceback
+            where = traceback.extract_tb(e.__traceback__)[-1]
+            events = [("ERROR", f"watch pass failed: {type(e).__name__}: {e} (fix-watch.py:{where.lineno})")]
         keys = {f"{k} {t}" for k, t in events}
         for k, t in events:
             key = f"{k} {t}"
