@@ -83,9 +83,15 @@ def check(C, seen):
         if a.get("status") == "needs-human":
             why = "; ".join(u.get("text", "") for u in a.get("unresolved", []))[:160]
             ev.append(("FAILED", f"area {k} needs a person{': ' + why if why else ''}"))
-    live = {j["id"] for j in running}
+    # a job handed out by `jobs next` (claimed) is live too: its agent may take a device before `jobs start`
+    live = {j["id"] for j in running} | {j["id"] for j in queued if now - float(j.get("claimed_at") or 0) < 900}
     for lock in glob.glob(f"{RUN}/fix/devices/*") + glob.glob(f"{RUN}/fix/stack/*"):
         if lock.endswith(".built"):
+            continue
+        try:
+            if now - os.path.getmtime(lock) < 120:   # just taken: the job may not be registered yet
+                continue
+        except OSError:
             continue
         try:
             holder = open(lock).read().strip()
@@ -132,7 +138,9 @@ def diagnose(C, kind, text):
     logs = sorted(glob.glob(f"{RUN}/logs/job-{m.group(1)}*.log")) if m else []
     tail = "\n".join(open(logs[-1], errors="replace").read().splitlines()[-40:]) if logs else ""
     prompt = (f"A crowd QA run's watch script reported: {kind} {text}\nLast lines of that job's log:\n{tail[-4000:]}\n\n"
-              "In at most two short lines: the likely cause, and the one command or action that unblocks it. No preamble.")
+              "In at most two short lines: the likely cause, and the one command or action that unblocks it. Never suggest "
+              "deleting a lock, killing a process or requeueing a job unless the log proves its holder is gone; when "
+              "unsure, say what to check first. No preamble.")
     try:
         r = subprocess.run(["claude", "-p", "--model", C.get("WATCH_MODEL") or "opus", "--effort", "low"],
                            input=prompt, capture_output=True, text=True, timeout=180)
