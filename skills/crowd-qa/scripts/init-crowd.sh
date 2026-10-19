@@ -127,6 +127,11 @@ FIXING="off"                    # on = run the fix stage after filing
 RUNNER="auto"                   # t3 | subagent | cli. auto = the orchestrating session decides (cli when crowd.py
                                 #   runs alone). t3 and subagent: the session launches jobs (crowd.py <run> jobs next)
 REPOS=""                        # local clones per tracker, for cli/subagent worktrees: "app=/path/app backend=/path/api"
+WATCH_STALL_MIN="40"            # fix-watch.py: a running job silent this long is STALLED
+WATCH_URL=""                    # fix-watch.py checks this answers when STACK_VERIFY is empty
+WATCH_AGENT="off"               # on = one low-effort model call per new problem, diagnosis in logs/watch.md
+WATCH_MODEL="opus"
+FIX_TRACKERS=""                 # trackers the fix stage may change, e.g. "app"; the others get issues only, no PR (empty = all)
 TRACKER_KIND=""                 # "app=fe backend=be": fe areas run dev servers side by side, be areas queue
 FIX_BASE="main"                 # branch fixes start from and PRs target
 FIX_PARALLEL="4"                # jobs at once

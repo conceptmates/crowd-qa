@@ -639,6 +639,51 @@ class Fixing(unittest.TestCase):
         prompts = " ".join(j["prompt_text"] for j in json.loads(r.crowd("jobs", "next").stdout))
         self.assertIn(f"filed by an earlier run: issue, card and diary under {old}", prompts)
 
+    def test_fix_trackers_keeps_other_repos_to_issues_only(self):
+        old = os.path.join(WORK, "fixtrk-parent")
+        shutil.rmtree(old, ignore_errors=True)
+        os.makedirs(os.path.join(old, "state"))
+        json.dump({"k-app": {"url": "https://github.com/owner/app/issues/41", "title": "COD order shows paid", "tracker": "app"},
+                   "k-be": {"url": "https://github.com/owner/backend/issues/7", "title": "Checkout takes no address",
+                            "tracker": "backend"}}, open(os.path.join(old, "state", "filed.json"), "w"))
+        r = self.fix_run("fixtrk", f'RUNNER=t3 FIX_FROM_RUNS="{old}" FIX_TRACKERS="app"')
+        res = r.crowd("all", timeout=300)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        areas = json.load(open(r.path("state", "areas-detail.json")))
+        keys = [k for a in areas.values() for k in a["bugs"]]
+        self.assertIn("k-app", keys)
+        self.assertNotIn("k-be", keys, "a tracker outside FIX_TRACKERS gets issues only")
+        self.assertTrue(all(a.get("tracker") != "backend" for a in areas.values()))
+
+    def test_the_watch_reports_free_slots_stalls_stale_locks_and_the_end(self):
+        run = os.path.join(WORK, "watch")
+        shutil.rmtree(run, ignore_errors=True)
+        for d in ("state", "logs", "fix/devices", "fix/jobs/fix-a-1"):
+            os.makedirs(os.path.join(run, d))
+        open(os.path.join(run, "config.env"), "w").write('FIX_PARALLEL="2"\nWATCH_STALL_MIN="1"\n')
+        old = time.time() - 3600
+        os.utime(os.path.join(run, "fix/jobs/fix-a-1"), (old, old))
+        jobs = {"fix-a-1": {"id": "fix-a-1", "area": "a", "role": "fix", "status": "running", "runner": "subagent",
+                            "started": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(old)),
+                            "prompt": os.path.join(run, "fix/jobs/fix-a-1/prompt.md"), "worktree": ""},
+                "review-b-1": {"id": "review-b-1", "area": "b", "role": "review", "status": "queued"}}
+        json.dump(jobs, open(os.path.join(run, "state/jobs.json"), "w"))
+        json.dump({"a": {"status": "fixing"}, "b": {"status": "reviewing"}}, open(os.path.join(run, "state/areas-detail.json"), "w"))
+        open(os.path.join(run, "fix/devices/emulator-5554"), "w").write("recheck-c-1\n")
+        watch = lambda: subprocess.run([sys.executable, os.path.join(SKILL, "scripts", "fix-watch.py"), run],
+                                       capture_output=True, text=True, timeout=60).stdout
+        out = watch()
+        self.assertIn("READY 1 of 1 queued jobs can start", out)
+        self.assertIn("STALLED fix-a-1", out)
+        self.assertIn("LOCK fix/devices/emulator-5554 is held by recheck-c-1", out)
+        self.assertNotIn("STALLED", watch(), "a problem already reported is not repeated within 10 minutes")
+        for j in jobs.values():
+            j["status"] = "done"
+        json.dump(jobs, open(os.path.join(run, "state/jobs.json"), "w"))
+        json.dump({"a": {"status": "done"}, "b": {"status": "needs-human"}}, open(os.path.join(run, "state/areas-detail.json"), "w"))
+        os.remove(os.path.join(run, "fix/devices/emulator-5554"))
+        self.assertIn("DONE 1 areas done, 1 need a person", watch())
+
     def test_a_job_without_a_valid_result_is_tried_again_then_left_to_a_person(self):
         r = self.fix_run("fixbad", "RUNNER=t3")
         r.crowd("all", timeout=300)
