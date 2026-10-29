@@ -842,12 +842,12 @@ function select(f, refresh) {
 }
 function showChar(c) {
   const mine = S.posts.filter(p => p.author === c.id).slice(-5).reverse();
-  const myBugs = S.bugs.filter(b => b.reporter === c.id);
+  const myBugs = S.bugs.filter(b => b.reporter === c.id && !["not-needed", "rejected"].includes(b.state));   // as c.bugs counts them
   openCard(`<h2><i style="background:${esc(c.color)}"></i>${esc(c.name)}</h2><div class="sub">${esc(c.role || "character")}${c.surface ? " · " + esc(c.surface) : ""}</div>
     <div class="chips"><span class="chip">${ICON[c.status] || ""} ${esc(STATUS_TEXT[c.status] || c.status)}</span><span class="chip">day ${esc(c.day)}${S.run.days ? " of " + esc(S.run.days) : ""}</span>
     <span class="chip">${esc(c.done)}/${esc(c.total)} scenarios</span><span class="chip">🐞 ${esc(c.bugs)}</span></div>
     ${c.shot ? `<a href="${esc(c.shot)}" target="_blank" rel="noopener"><img class="shot" src="${esc(c.shot)}" alt="latest screenshot"></a>` : ""}
-    ${myBugs.length ? `<h3>Bugs</h3>` + myBugs.slice(0, 5).map(b => `<div class="post"><span class="k">${esc(b.state)}</span>${b.url ? `<a href="${esc(b.url)}" target="_blank" rel="noopener">${esc(clip(b.title, 90))}</a>` : esc(clip(b.title, 90))}</div>`).join("") : ""}
+    ${myBugs.length ? `<h3>Bugs · <a href="#" data-square="bugs">see every bug</a></h3>` + myBugs.slice(0, 5).map(b => `<div class="post"><span class="k">${esc(b.state)}</span>${b.url ? `<a href="${esc(b.url)}" target="_blank" rel="noopener">${esc(clip(b.title, 90))}</a>` : esc(clip(b.title, 90))}</div>`).join("") : ""}
     <h3>Last posts</h3>${mine.map(p => `<div class="post"><span class="t">${esc((p.ts || "").slice(11, 16))}</span>${p.kind !== "post" ? `<span class="k">${esc(p.kind)}</span>` : ""}${esc(clip(p.text, 200))}</div>`).join("") || `<div class="post">Nothing posted yet.</div>`}
     <div class="act"><button class="go" data-square="${esc(c.id)}">Open in square</button></div>`);
 }
@@ -898,7 +898,8 @@ function showPost() {
       <span class="meta">${esc(g.repo)} #${g.n}${g.comment ? " · comment" : ""}${nm(b.reporter) ? " · by " + esc(nm(b.reporter)) : ""}${b.area ? " · " + esc(b.area) : ""}</span>
       ${b.severity ? `<span class="lb ${esc(b.severity)}">${esc(b.severity)}</span>` : ""}${b.state === "in-pr" ? `<span class="lb pr">in a PR</span>` : ""}</span></a>`;
   openCard(`<h2><i style="background:#c23f33"></i>Post office</h2><div class="sub">${created} issues filed · ${rows.length - created} comments on existing issues</div>
-    ${rows.map(row).join("") || `<div class="post">Nothing filed yet.</div>`}`);
+    ${rows.map(row).join("") || `<div class="post">Nothing filed yet.</div>`}
+    <div class="act"><button class="go" data-square="bugs">Every bug, filed or not</button></div>`);
 }
 function showBout(b) {
   const nm = id => (S.characters.find(c => c.id === id) || {}).name || id;
@@ -915,12 +916,16 @@ function toggleSquare(open = !document.body.classList.contains("sq-open"), hash 
   document.body.classList.toggle("sq-open", open);
   $("#sq").setAttribute("aria-hidden", String(!open));
   $("#sq-toggle").textContent = open ? "Close square" : "Square";
+  // a closed panel keeps polling: off #bugs, so it stops marking bugs as seen while nobody is looking at them
+  if (!open && frame.src) try { const w = frame.contentWindow; if (w.location.hash === "#bugs") w.location.hash = "square" } catch (e) { frame.src = "square.html#square" }
 }
 $("#sq-toggle").addEventListener("click", () => toggleSquare());
-card.addEventListener("click", ev => { const b = ev.target.closest("[data-square]"); if (b) toggleSquare(true, b.dataset.square) });
+$("#bugs-toggle").addEventListener("click", () => toggleSquare(true, "bugs"));
+card.addEventListener("click", ev => { const b = ev.target.closest("[data-square]"); if (b) { ev.preventDefault(); toggleSquare(true, b.dataset.square) } });
 addEventListener("keydown", ev => {
   if (ev.target.closest && ev.target.closest("input,select,textarea")) return;
   if (ev.key === "s" || ev.key === "S") toggleSquare();
+  if (ev.key === "b" || ev.key === "B") toggleSquare(true, "bugs");
   if (ev.key === "Escape") { card.hidden = true; select(null) }
 });
 

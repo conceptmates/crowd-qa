@@ -2,12 +2,15 @@
 """Renders the crowd run as a live town: <run>/square/index.html is a 3D world, square.html the Discord-style square.
 
 square.html:
-  left    channels: #town-square, #notices, #before-outage, then one channel per character with a status dot,
-          day and progress bar
+  left    channels: #town-square, #bugs, #notices, #before-outage, then one channel per character with a status
+          dot, day and progress bar
   middle  the square as threads (a post plus its me-too / cant-repro / disagree / tip replies), or, in a
           character's channel: their to-do list for today (each scenario and its status), their findings,
           judge verdicts, their latest screenshot (a live view) and their own posts
   right   members grouped by what they are doing now
+  #bugs   every bug in one place: found, judged, filed, being fixed, fixed, or dropped (not worth an issue, not a bug,
+          refused, skipped) with the reason; each with its reporter, me-toos, issue, fix stage, re-test verdict and PR.
+          A bug that moved since you last looked is marked "updated"; the channel's badge counts them.
 
 Every pass also writes square/state.json (and state.js, the same data for pages opened from file://): characters,
 posts, bugs, fix/review/recheck jobs, bouts and PRs. index.html is scripts/world/ in one file with the state
@@ -177,46 +180,147 @@ def result_word(r):
     return next((w for w in ("partial", "pass", "fail") if w in r), "")
 
 
-def bug_list(run, people, filed, areas, prs):
+def title_key(title):
+    return hashlib.sha1((title or "").encode()).hexdigest()[:12]   # crowd.py keys an issue the same way
+
+
+def characters_in(xs, ids, reporter="", names=None):
+    """Character ids out of a confirmers / cant_repro list. Judges sometimes put a scenario id there (dropped), and a
+    cant_repro entry is often a sentence ("Maya could not reproduce it on Android"): it counts for the character it
+    names by id, full name or first name."""
+    out = []
+    for c in xs or []:
+        c = c.get("id", "") if isinstance(c, dict) else str(c)
+        if c not in ids:
+            words = lambda i: {i, (names or {}).get(i) or i, ((names or {}).get(i) or i).split(" ")[0]}
+            c = next((i for i in sorted(ids) if any(re.search(rf"(?<!\w){re.escape(w)}(?!\w)", c, re.I) for w in words(i) if w)), "")
+        if c in ids and c != reporter and c not in out:
+            out.append(c)
+    return out
+
+
+def shot_of(paths, run, embed):
+    """The first screenshot that is still on disk, as the pages link it; an http(s) link (an uploaded image) as is."""
+    for p in paths or []:
+        if isinstance(p, str) and re.match(r"https?://", p):
+            return p
+        out = src(p, run, embed) if isinstance(p, str) else ""
+        if out:
+            return out
+    return ""
+
+
+def bug_list(run, people, filed, areas, prs, embed=False):
+    """Every bug the run knows about, in one list: what the characters found, what the judges kept, threw out or
+    called not worth an issue, what was filed, and how each one is doing in the fix stage (its area's status, its
+    re-check verdict, its PR)."""
     s = f"{run}/state"
+    deduped = os.path.exists(f"{s}/issues.json")   # only dedupe writes it; [] means nothing was left to file
     issues = read(f"{s}/issues.json", []) or []
+    issues = issues if isinstance(issues, list) else []
     refused = read(f"{s}/refused.json", {}) or {}
+    refused = refused if isinstance(refused, dict) else {}
     plan = {p.get("key"): p for p in as_list(read(f"{s}/file-plan.json", []), "key")}
+    detail = read(f"{s}/areas-detail.json", {}) or {}
+    detail = detail if isinstance(detail, dict) else {}
     area_of = {k: a for a, ks in (areas or {}).items() if isinstance(ks, list) for k in ks}
-    in_pr = {k for pr in prs for k in (pr.get("bugs") or [])}
+    pr_of = {k: pr for pr in prs if pr.get("url") for k in (pr.get("bugs") or [])}   # finalize writes areas with no PR too
+    failed = {j.get("area"): j.get("role") for j in as_list(read(f"{s}/jobs.json", {}), "id") if j.get("status") == "failed"}
     ids = {p["id"] for p in people}
+    names = {p["id"]: p["name"] for p in people}
     bugs = {}
-    if issues:
+
+    def add(k, f, reporter, state, why=""):
+        b = {"key": k, "title": f.get("title", ""), "severity": f.get("severity", ""), "reporter": reporter,
+             "confirmers": characters_in(f.get("confirmers"), ids, reporter, names), "state": state,
+             "type": f.get("type", ""), "day": f.get("day", ""), "cant_repro": characters_in(f.get("cant_repro"), ids, reporter, names),
+             "shot": shot_of(f.get("screenshots"), run, embed), "why": why, "rescued": bool(f.get("rescued"))}
+        bugs[k] = b
+        return b
+
+    # what each day's judge said: verified, not worth an issue, or not a bug at all
+    verified, not_needed, rejected, judged = {}, {}, {}, {}
+    for p in people:
+        judged[p["id"]] = set()
+        for v in sorted(glob.glob(f"{run}/lanes/{p['id']}/round*/verdict.json")):
+            day = int(re.sub(r"\D", "", os.path.basename(os.path.dirname(v))) or 0)
+            judged[p["id"]].add(day)
+            v = read(v, {}) or {}
+            if not isinstance(v, dict):
+                continue
+            rep = read(f"{run}/lanes/{p['id']}/round{day}/report.json", {}) or {}
+            found = {str(f.get("id")): f for f in (rep.get("findings") or []) if isinstance(f, dict)} if isinstance(rep, dict) else {}
+            for f in (x for x in v.get("verified_findings") or [] if isinstance(x, dict)):
+                verified[title_key(f.get("title"))] = ({"day": day, **f}, p["id"])
+            for f in (x for x in v.get("not_needed") or [] if isinstance(x, dict)):
+                why = f.get("why_not", "") + (" (the severity bar)" if f.get("by") == "code" else "")
+                not_needed[title_key(f.get("title"))] = ({"day": day, **f}, p["id"], why)
+            for f in (x for x in v.get("rejected") or [] if isinstance(x, dict)):
+                seen = dict(found.get(str(f.get("id")), {}))   # the tester's own finding: its severity and screenshots
+                seen["screenshots"] = [os.path.join(f"{run}/lanes/{p['id']}/round{day}", x)   # relative to the round, as crowd.py reads them
+                                       for x in seen.get("screenshots") or [] if isinstance(x, str)]
+                rejected[title_key(f.get("title"))] = ({"day": day, **seen, **f}, p["id"], f.get("reason", ""))
+
+    if deduped:   # after dedupe: one issue per bug, the others who saw it as confirmers
         for i in (x for x in issues if isinstance(x, dict)):
-            k = i.get("key") or hashlib.sha1(i.get("title", "").encode()).hexdigest()[:12]
-            bugs[k] = {"key": k, "title": i.get("title", ""), "severity": i.get("severity", ""), "reporter": i.get("reporter", ""),
-                       "confirmers": []}
-            for c in i.get("confirmers") or []:   # judges sometimes put a scenario id here: keep characters only
-                c = c.get("id", "") if isinstance(c, dict) else str(c)
-                if c in ids and c != i.get("reporter") and c not in bugs[k]["confirmers"]:
-                    bugs[k]["confirmers"].append(c)
+            add(i.get("key") or title_key(i.get("title")), i, i.get("reporter", ""), "verified")
     else:   # before dedupe: what the judges verified, and today's findings still waiting for a judge
+        for k, (f, who) in verified.items():
+            add(k, f, who, "verified")
         for p in people:
-            judged = set()
-            for v in sorted(glob.glob(f"{run}/lanes/{p['id']}/round*/verdict.json")):
-                judged.add(int(re.sub(r"\D", "", os.path.basename(os.path.dirname(v)))))
-                for f in (read(v, {}) or {}).get("verified_findings", []):
-                    k = hashlib.sha1(f.get("title", "").encode()).hexdigest()[:12]
-                    bugs[k] = {"key": k, "title": f.get("title", ""), "severity": f.get("severity", ""), "reporter": p["id"],
-                               "confirmers": [], "state": "verified"}
-            if p["day"] not in judged:
+            if p["day"] not in judged[p["id"]]:
                 for f in p["findings"]:
-                    k = hashlib.sha1(f["title"].encode()).hexdigest()[:12]
-                    bugs.setdefault(k, {"key": k, "title": f["title"], "severity": f["severity"], "reporter": p["id"],
-                                        "confirmers": [], "state": "found"})
+                    if title_key(f["title"]) not in bugs:
+                        add(title_key(f["title"]), {"day": p["day"], **f}, p["id"], "found")
+    for k, (f, who, why) in not_needed.items():
+        if k not in bugs:
+            add(k, f, who, "not-needed", why)
+    for k, (f, who, why) in rejected.items():
+        if k not in bugs:
+            add(k, f, who, "rejected", why)
+    for k, r in refused.items():   # the check before filing: not needed, or not filed for another reason
+        if k not in bugs and isinstance(r, dict):
+            b = r.get("bug") if isinstance(r.get("bug"), dict) else {"title": r.get("title", "")}
+            add(k, b, b.get("reporter", ""), "refused")
     for k, v in filed.items():
-        bugs.setdefault(k, {"key": k, "title": v.get("title", ""), "severity": "", "reporter": "", "confirmers": []})
+        if k not in bugs:
+            add(k, v if isinstance(v, dict) else {}, (v or {}).get("reporter", "") if isinstance(v, dict) else "", "filed")
+
     for k, b in bugs.items():
-        action = (plan.get(k) or {}).get("action", "")
-        b["state"] = ("in-pr" if k in in_pr else "filed" if k in filed else "refused" if k in refused
-                      else "skipped" if action == "skip" else "planned" if action else b.get("state", "verified"))
-        b["url"] = (filed.get(k) or {}).get("url", "") or ((plan.get(k) or {}).get("target", "") if action not in ("", "skip") else "")
+        p = plan.get(k) or {}
+        action = p.get("action", "")
+        r = refused.get(k) if isinstance(refused.get(k), dict) else None
+        if k in pr_of:
+            b["state"] = "in-pr"
+        elif k in filed:
+            b["state"] = "filed"
+        elif r:
+            nn = r.get("not_needed") or str(r.get("reason", "")).startswith("not needed:")
+            b["state"] = "not-needed" if nn else "refused"
+            b["why"] = re.sub(r"^not needed:\s*", "", str(r.get("reason", "")))
+        elif action == "skip":
+            b["state"], b["why"] = "skipped", p.get("reason", "") or b["why"]
+        elif action:
+            b["state"] = "planned"
+        b["url"] = (filed.get(k) or {}).get("url", "") if isinstance(filed.get(k), dict) else ""
+        t = str(p.get("target") or "").lstrip("#")
+        b["plan"] = (f"{'a regression of' if action == 'regression' else 'to comment on'} #{t}"
+                     if b["state"] == "planned" and t and action in ("comment", "regression") else "")
         b["area"] = area_of.get(k, "")
+        b["fix"] = {}
+        a = detail.get(b["area"]) if b["area"] else None
+        if isinstance(a, dict) and k in (a.get("bugs") or []):
+            rc = (a.get("recheck") or {}).get(k) or {}
+            rc = rc if isinstance(rc, dict) else {}
+            b["fix"] = {"status": a.get("status", ""), "attempt": a.get("attempt", 1),
+                        "verdict": str((a.get("verdicts") or {}).get(k, "") or "").upper(), "note": rc.get("note", ""),
+                        "by": rc.get("persona", ""), "shot": shot_of([rc.get("shot")], run, embed),
+                        "comment": rc.get("comment", ""), "failed": failed.get(b["area"], ""),
+                        "unresolved": bool(a.get("unresolved"))}
+        pr = pr_of.get(k) or {}
+        if not pr.get("url") and b["fix"] and isinstance(a.get("pr"), str) and a["pr"]:   # the fixer's draft, before finalize
+            pr = {"url": a["pr"], "number": int((re.search(r"/pull/(\d+)", a["pr"]) or [0, 0])[1]) or "", "status": "draft"}
+        b["pr"] = {"url": pr.get("url", ""), "number": pr.get("number", ""), "status": pr.get("status", "")} if pr.get("url") else {}
     return list(bugs.values())
 
 
@@ -246,11 +350,21 @@ def stage(run, people, jobs, prs, areas):
     return "run" if any(p["status"] != "queued" for p in people) else "plan"
 
 
+def parent_runs(run):
+    """FIX_FROM_RUNS from config.env (sourced, as crowd.py reads it): the runs whose filed bugs this run fixes too."""
+    if "FIX_FROM_RUNS" not in (read(f"{run}/config.env", "") or ""):
+        return []
+    import subprocess
+    out = subprocess.run(["bash", "-c", f'set -a; . "{run}/config.env" >/dev/null 2>&1; printf %s "$FIX_FROM_RUNS"'],
+                         capture_output=True, text=True).stdout
+    return [h for h in out.split() if os.path.isdir(h)]
+
+
 STATUS = {"running": "testing", "judging": "judged", "judged": "done", "done": "done", "stopped": "blocked",
           "waiting-stack": "blocked", "waiting-disk": "blocked"}
 
 
-def world_state(run, data):
+def world_state(run, data, embed=False):
     """The shape square/state.json promises (see the module docstring); missing sources give empty lists."""
     s = f"{run}/state"
     people = data["people"]
@@ -291,8 +405,19 @@ def world_state(run, data):
                       "b": b.get("b", ""), "subject": b.get("subject", ""), "rounds": rounds, "winner": b.get(b.get("winner"), b.get("winner", "")) if b.get("winner") in ("a", "b") else b.get("winner", ""),
                       "scores": b.get("scores") or {}, "status": b.get("status", "")})
     areas = read(f"{s}/areas.json", {}) or {}
+    areas = areas if isinstance(areas, dict) else {}
     filed = read(f"{s}/filed.json", {}) or {}
-    bugs = bug_list(run, people, filed if isinstance(filed, dict) else {}, areas if isinstance(areas, dict) else {}, prs)
+    filed = dict(filed) if isinstance(filed, dict) else {}
+    fixing = {k for ks in areas.values() if isinstance(ks, list) for k in ks}
+    for home in parent_runs(run):   # bugs the earlier runs filed that this run is fixing; this run's own win
+        old = read(f"{home}/state/filed.json", {}) or {}
+        why = {i.get("key"): i for i in read(f"{home}/state/issues.json", []) or [] if isinstance(i, dict)}
+        for k, v in (old.items() if isinstance(old, dict) else []):
+            if k in fixing and k not in filed and isinstance(v, dict):
+                i = why.get(k) or {}
+                filed[k] = {**i, **v, "reporter": v.get("reporter") or i.get("reporter", ""),
+                            "severity": v.get("severity") or i.get("severity", "")}
+    bugs = bug_list(run, people, filed, areas, prs, embed)
     busy = {}
     for j in jobs:
         if j["status"] == "running" and j["persona"] and j["role"] in ("recheck", "fix"):
@@ -300,7 +425,8 @@ def world_state(run, data):
     col = colors(people)
     chars = [{"id": p["id"], "name": p["name"], "role": p["role"], "surface": p["surface"],
               "status": busy.get(p["id"]) or STATUS.get(p["status"]) or "waiting", "day": p["day"], "done": p["done"],
-              "total": p["total"], "bugs": sum(1 for b in bugs if b["reporter"] == p["id"]), "color": col[p["id"]],
+              "total": p["total"], "bugs": sum(1 for b in bugs if b["reporter"] == p["id"] and b["state"] not in ("not-needed", "rejected")),
+              "color": col[p["id"]],
               "engine": "codex" if str(p.get("engine", "")).startswith("cod") else "claude",
               "shot": p["live"]} for p in people]
     posts = [{"id": e.get("id", ""), "author": e.get("author", ""), "kind": (e.get("kind") or "post").replace("-", ""),
@@ -441,6 +567,8 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0}
 @media (max-width:1100px){.app{grid-template-columns:210px 1fr}aside.members{display:none}.grid2{grid-template-columns:1fr}}
 @media (max-width:720px){.app{grid-template-columns:1fr}#channels,.steps,.top .desc,.stats span:not(:first-child){display:none}.strip .brand{display:block;overflow:hidden;text-overflow:ellipsis}.strip{justify-content:space-between}.msg{padding:4px 12px}.filters{padding:8px 12px}}
 .embedded .strip .btn{display:none}
+#chpick{display:none;background:var(--deep);color:var(--text);border:1px solid #4e5058;border-radius:4px;padding:2px 6px;font:inherit;max-width:45vw}
+@media (max-width:720px){#chpick{display:block}.bugbar{flex-wrap:nowrap;overflow-x:auto}.bugbar .chip,.bugbar select,.bugbar .count{flex:none;white-space:nowrap}}
 .mem{display:flex;align-items:center;gap:10px;margin:1px 8px;padding:4px 8px;border-radius:4px;cursor:pointer}
 .mem:hover{background:var(--hover)}.mem .av{width:30px;height:30px;font-size:11px;position:relative}
 .mem .av .dot{position:absolute;right:-2px;bottom:-2px;width:10px;height:10px;border:3px solid var(--side);box-sizing:content-box}
@@ -451,8 +579,24 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0}
 #zoom .cap{color:var(--muted);font-size:13px}
 #zoom .nav{position:absolute;top:50%;transform:translateY(-50%);background:rgba(255,255,255,.08);color:#fff;border:0;border-radius:50%;width:44px;height:44px;font-size:22px;cursor:pointer}
 #zoom .nav:hover{background:rgba(255,255,255,.18)}#zoom .prev{left:20px}#zoom .next{right:20px}
+.bug{margin:8px 16px;background:var(--side);border-radius:8px;padding:10px 14px;border-left:3px solid #4e5058}
+.bug.g-human{border-left-color:var(--red)}.bug.g-fixing{border-left-color:var(--yellow)}.bug.g-fixed{border-left-color:var(--green)}
+.bug.g-filed{border-left-color:var(--accent)}.bug.g-out{opacity:.8}.bug.is-fresh{box-shadow:0 0 0 1px var(--accent)}
+.bug .hd{display:flex;align-items:flex-start;gap:6px}.bug .hd b{flex:1;min-width:0}.bug .links{display:flex;flex-wrap:wrap;gap:6px;flex:none}
+.lnk{font-size:12px;border:1px solid #4e5058;border-radius:10px;padding:1px 8px;text-decoration:none;white-space:nowrap;color:var(--link);cursor:pointer}
+span.lnk{color:var(--muted);cursor:default}
+.bug .meta{color:var(--muted);font-size:12px;margin-top:4px;display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center}
+.bug .meta .st{color:var(--text);font-weight:600}
+.mini{display:inline-flex;align-items:center;gap:4px;cursor:pointer}.mini:hover{color:var(--text)}.mini .av{width:18px;height:18px;font-size:8px}
+.path{display:flex;flex-wrap:wrap;gap:3px;margin-top:8px;font-size:11px}.path span{padding:2px 8px;border-radius:10px;color:var(--faint);background:var(--deep)}
+.path span.ok{color:#d7ffe9;background:#1f6f4a}.path span.now{color:#fff;background:var(--accent);font-weight:700}.path span.stuck{color:#fff;background:var(--red);font-weight:700}
+.rc,.why{margin-top:6px;font-size:13px}.why{color:var(--muted)}
+.cmd{display:inline-block;margin-top:2px;background:var(--deep);border-radius:4px;padding:2px 6px;font:12px ui-monospace,Menlo,monospace;user-select:all;color:var(--text);overflow-wrap:anywhere}
+.fresh{background:var(--accent);color:#fff;font-size:10px;font-weight:700;border-radius:3px;padding:1px 5px;text-transform:uppercase;flex:none;margin-top:2px}
+.gcat{color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;padding:14px 16px 0}
+.ch .cnt{font-size:11px;color:var(--faint)}
 </style></head><body><div class="wrap">
-<header class="strip"><span class="brand" id="brand"></span><div class="steps" id="steps"></div><a class="btn primary" href="index.html" title="The run as a 3D town">World</a></header>
+<header class="strip"><span class="brand" id="brand"></span><select id="chpick" aria-label="Channel"></select><div class="steps" id="steps"></div><a class="btn primary" href="index.html" title="The run as a 3D town">World</a></header>
 <div class="app"><aside id="channels"></aside><main><div class="top" id="top"></div><div id="banner"></div><div class="scroll" id="view"></div></main>
 <aside class="members" id="members"></aside></div></div>
 <div id="zoom"><button class="nav prev" aria-label="Previous">‹</button><img alt=""><div class="cap"></div><button class="nav next" aria-label="Next">›</button></div>
@@ -474,10 +618,25 @@ const STLABEL = {running: "testing now", waiting: "waiting", "waiting-capacity":
 const STEPS = [["plan", "Plan"], ["run", "Test"], ["judge", "Judge"], ["file", "File"], ["fix", "Fix"], ["review", "Review"], ["recheck", "Recheck"], ["pr", "PR"], ["report", "Report"]];
 const KINDS = [["", "All"], ["post", "Posts"], ["me-too", "Me too"], ["cant-repro", "Can't repro"], ["disagree", "Disagree"], ["tip", "Tips"]];
 const F = Object.assign({kind: "", who: "", shot: false}, JSON.parse(sessionStorage.getItem("filters") || "{}"));
+// #bugs: every bug in one place, grouped by where it is now
+const BG = [["", "All"], ["human", "Needs a person"], ["fixing", "Being fixed"], ["filed", "Filed"], ["waiting", "Waiting to file"],
+  ["fixed", "Fixed"], ["out", "Dropped"]];
+const BGTEXT = Object.fromEntries(BG);
+const BSTATE = {found: "found, waiting for the judge", verified: "verified, waiting to be filed", planned: "planned for filing",
+  filed: "filed", "in-pr": "filed, in a PR", "not-needed": "not worth an issue", rejected: "judged not a bug",
+  refused: "not filed", skipped: "skipped at filing"};
+const FXW = {queued: "waiting for a fixer", fixing: "being fixed", reviewing: "in review", rechecking: "being re-tested",
+  done: "fix stage done", "needs-human": "needs a person"};
+const RCW = {PASS: "✅ re-test passed", PARTIAL: "🟨 partly fixed", FAIL: "❌ still broken", BLOCKED: "⛔ could not re-test"};
+const SEVN = {critical: 4, high: 3, medium: 2, low: 1};
+const PATH = ["Found", "Judged", "Filed", "Fix", "Review", "Re-test", "Fixed"];
+const BF = Object.assign({g: "", who: ""}, JSON.parse(sessionStorage.getItem("bugfilters") || "{}"));
 const dotCls = s => "s-" + (s.startsWith("waiting") ? (s === "waiting-stack" ? "down" : "waiting") : s);
 let shown = [];   // screenshots on screen, in order, for the lightbox arrows
 function img(e) { if (!e.img) return ""; shown.push({src: e.img, cap: `${name(e.author)} · ${e.id || ""} ${t(e.ts)}`});
   return `<img class="shot" src="${esc(e.img)}" data-i="${shown.length - 1}" alt="">` }
+function shotLink(src, cap, label) { if (!src) return ""; shown.push({src, cap});
+  return `<a class="lnk shotlink" data-i="${shown.length - 1}">📸 ${esc(label)}</a>` }
 let zi = -1;
 function zoom(i) { if (!shown.length) return; zi = (i + shown.length) % shown.length; const z = document.getElementById("zoom");
   z.querySelector("img").src = shown[zi].src; z.querySelector(".cap").textContent = shown[zi].cap; z.style.display = "flex" }
@@ -511,7 +670,9 @@ function channels(sel) {
   const ch = (key, label, extra = "", icon = "#") => `<a class="ch ${sel === key ? "sel" : ""}" href="#${key}"><span class="hash">${icon}</span><span class="nm">${label}</span>${extra}</a>`;
   const live = posts.filter(e => !isOld(e) && e.author !== "organiser").length;
   let h = `<div class="guild" title="${esc(D.title)}">${esc(D.title)}</div><div class="cat">Text channels</div>` +
-    ch("square", "town-square", live ? `<span class="badge">${live}</span>` : "") + ch("notices", "notices") +
+    ch("square", "town-square", live ? `<span class="badge">${live}</span>` : "") +
+    ch("bugs", "bugs", (u => u ? `<span class="badge" title="moved since you last looked">${u}</span>` : (D.bugs || []).length ? `<span class="cnt">${D.bugs.length}</span>` : "")(sel === "bugs" ? 0 : unseenBugs())) +
+    ch("notices", "notices") +
     (D.epoch ? ch("before", "before-outage") : "") + `<div class="cat">Characters · ${D.people.length}</div>`;
   for (const p of D.people) {
     const pct = p.total ? Math.round(100 * p.done / p.total) : 0;
@@ -545,11 +706,89 @@ function person(p) {
     `<li><span class="ic">${ICON[x.status] || "⬜"}</span><div class="t"><b>${esc(x.id)}</b> ${esc(x.title)}${x.tags.map(g => `<span class="tag">${esc(g)}</span>`).join("")}${x.note ? `<div class="n">${esc(x.note)}</div>` : ""}</div></li>`).join("")
     : `<li class="empty">No plan for this day yet.</li>`) + `</ul></div><div>`;
   h += `<div class="panel"><h3>Live view ${p.live_name ? "· " + esc(p.live_name) : ""}</h3>${p.live ? img({img: p.live, author: p.id, id: p.live_name}).replace('class="shot"', 'class="shot" style="max-height:320px"') : `<div class="empty">No screenshot yet.</div>`}</div>`;
-  h += `<div class="panel"><h3>Findings today (${p.findings.length})</h3>` + (p.findings.length ? p.findings.map(f => `<div style="margin:4px 0"><span class="sev sev-${esc(f.severity)}">${esc(f.severity)}</span>${esc(f.title)}</div>`).join("") : `<div class="empty" style="padding:4px 0">None yet.</div>`) + `</div>`;
+  h += `<div class="panel"><h3>Findings today (${p.findings.length}) · <a href="#bugs" data-bugs="${esc(p.id)}">all their bugs</a></h3>` + (p.findings.length ? p.findings.map(f => `<div style="margin:4px 0"><span class="sev sev-${esc(f.severity)}">${esc(f.severity)}</span>${esc(f.title)}</div>`).join("") : `<div class="empty" style="padding:4px 0">None yet.</div>`) + `</div>`;
   h += p.verdicts.map(v => `<div class="panel"><h3>Judge · day ${v.day}</h3><div>coverage ${v.coverage ?? "?"} · in character ${v.in_character ?? "?"} · ${v.verified.length} verified · ${v.satisfied ? "satisfied" : "not satisfied"}</div><div class="n" style="color:var(--muted);font-size:12px;margin-top:4px">${esc(v.reason)}</div></div>`).join("");
   h += `</div></div>`;
   const mine = D.feed.filter(e => e.author === p.id).reverse();
   h += `<div class="cat" style="padding-left:16px">Posts by ${esc(p.name)} · ${mine.length}</div>` + (mine.map(flat).join("") || `<div class="empty">Nothing posted yet.</div>`);
+  return h;
+}
+
+function bgroup(b) {
+  const f = b.fix || {};
+  if (["not-needed", "rejected", "refused", "skipped"].includes(b.state)) return "out";
+  if (f.verdict === "PASS" && !f.unresolved) return "fixed";
+  if (f.status === "needs-human" || f.status === "done") return "human";
+  if (f.status) return "fixing";
+  return ["filed", "in-pr"].includes(b.state) ? "filed" : "waiting";
+}
+function bpath(b) {   // Found > Judged > Filed > Fix > Review > Re-test > Fixed, the step it is on lit up
+  const f = b.fix || {};
+  if (bgroup(b) === "out") return "";
+  let done = 3, now = b.area ? 3 : -1, stuck = false;
+  if (b.state === "found") done = now = 1;
+  else if (["verified", "planned"].includes(b.state)) done = now = 2;
+  else if (f.unresolved && f.status === "needs-human") { done = now = 4; stuck = true }   // review blockers nobody fixed
+  else if (f.verdict === "PASS") { done = PATH.length; now = -1 }
+  else if (f.status) { const i = {queued: 3, fixing: 3, reviewing: 4, rechecking: 5}[f.status];
+    done = now = i ?? ({fix: 3, review: 4, recheck: 5}[f.failed] ?? 5); stuck = i === undefined }
+  return `<div class="path">` + PATH.map((l, i) => `<span class="${i === now ? (stuck ? "stuck" : "now") : i < done ? "ok" : ""}">${l}</span>`).join("") + `</div>`;
+}
+const isUrl = u => /^https?:\/\//i.test(u || "");
+const ghRef = u => { const m = /\/(issues|pull)\/(\d+)(#issuecomment)?/.exec(u || ""); return m ? "#" + m[2] + (m[3] ? " comment" : "") : "" };
+const lnk = (u, label) => isUrl(u) ? `<a class="lnk" href="${esc(u)}" target="_blank" rel="noopener">${esc(label)} ↗</a>` : "";
+const mini = id => `<span class="mini" data-go="${esc(id)}">${av(id)}${esc(name(id))}</span>`;
+// crowd.py rescue brings back every not-needed finding whose title contains its words: pass the whole title, single-quoted
+const shq = t => "'" + String(t).replace(/'/g, "'\\''") + "'";
+const bsig = b => [b.state, (b.fix || {}).status, (b.fix || {}).verdict, b.url, (b.pr || {}).url].join("|");
+let bugFresh = new Set(), onBugs = false;
+function seenBugs() { try { return JSON.parse(localStorage.getItem("bugs-seen:" + D.run) || "null") } catch (e) { return null } }
+function unseenBugs() { const s = seenBugs(); return s ? (D.bugs || []).filter(b => s[b.key] !== bsig(b)).length : 0 }
+function visitBugs(here) {   // a bug that moved since your last look is marked "updated" until you leave #bugs
+  if (!here) { onBugs = false; return }
+  const s = seenBugs();
+  if (!onBugs) bugFresh = new Set();
+  onBugs = true;
+  if (s) for (const b of D.bugs || []) if (s[b.key] !== bsig(b)) bugFresh.add(b.key);
+  try { localStorage.setItem("bugs-seen:" + D.run, JSON.stringify(Object.fromEntries((D.bugs || []).map(b => [b.key, bsig(b)])))) } catch (e) {}
+}
+function bugRow(b) {
+  const f = b.fix || {}, g = bgroup(b), u = isUrl(b.url) ? b.url : "", ref = ghRef(u);
+  const status = g === "fixed" ? (b.pr && b.pr.url ? "fixed, in a PR" : "fixed, re-test passed")
+    : g === "out" || !f.status ? BSTATE[b.state] || b.state : FXW[f.status] || f.status;
+  const meta = [`<span class="st">${esc(status)}</span>`, b.reporter ? `<span>by ${mini(b.reporter)}</span>` : "",
+    (b.confirmers || []).length ? `<span>me too: ${b.confirmers.map(mini).join(" ")}</span>` : "",
+    (b.cant_repro || []).length ? `<span>can't repro: ${b.cant_repro.map(mini).join(" ")}</span>` : "",
+    b.day ? `<span>day ${esc(b.day)}</span>` : "", b.type && b.type !== "bug" ? `<span>${esc(b.type)}</span>` : "",
+    b.area ? `<span>area ${esc(b.area)}</span>` : "", f.attempt > 1 ? `<span>fix attempt ${esc(f.attempt)}</span>` : "",
+    f.unresolved ? `<span>the review's blockers are not fixed</span>` : "",
+    b.rescued ? `<span>brought back by a person</span>` : ""].filter(Boolean).join("");
+  const links = (u ? lnk(u, ref ? (ref.endsWith("comment") ? "comment on " + ref.split(" ")[0] : "issue " + ref) : "issue")
+      : b.plan ? `<span class="lnk">${esc(b.plan)}</span>` : "") +
+    (b.pr && b.pr.url ? lnk(b.pr.url, "PR" + (b.pr.number ? " #" + b.pr.number : "")) : "") +
+    shotLink(b.shot, `${name(b.reporter)} · ${b.title}`, "screenshot");
+  const rc = f.verdict ? `<div class="rc">${RCW[f.verdict] || esc(f.verdict)}${f.by ? ` · re-tested by ${mini(f.by)}` : ""}${f.note ? ` · ${esc(f.note)}` : ""}
+    ${lnk(f.comment, "re-test comment")} ${shotLink(f.shot, `${name(f.by || b.reporter)} re-testing · ${b.title}`, "re-test")}</div>` : "";
+  const why = g === "out" ? `<div class="why">${esc(BSTATE[b.state] || b.state)}${b.why ? ": " + esc(b.why) : ""}</div>` +
+    (b.state === "not-needed" ? `<div class="why">To file it anyway: <code class="cmd" title="Select and copy">python3 "$RUN/scripts/crowd.py" "$RUN" rescue ${esc(shq(b.title))}</code></div>` : "") : "";
+  return `<div class="bug g-${g}${bugFresh.has(b.key) ? " is-fresh" : ""}" id="bug-${esc(b.key)}"><div class="hd">${bugFresh.has(b.key) ? `<span class="fresh">updated</span>` : ""}
+    ${b.severity ? `<span class="sev sev-${esc(b.severity)}">${esc(b.severity)}</span>` : ""}<b>${esc(b.title)}</b><span class="links">${links}</span></div>
+    <div class="meta">${meta}</div>${bpath(b)}${rc}${why}</div>`;
+}
+function board() {
+  const all = D.bugs || [], mine = b => !BF.who || b.reporter === BF.who;
+  const n = g => all.filter(b => bgroup(b) === g && mine(b)).length;
+  const who = [...new Set([...all.map(b => b.reporter), BF.who].filter(Boolean))].sort((a, b) => name(a).localeCompare(name(b)));
+  const hit = all.filter(b => (!BF.g || bgroup(b) === BF.g) && mine(b));
+  const order = BG.map(x => x[0]).filter(Boolean);
+  hit.sort((a, b) => order.indexOf(bgroup(a)) - order.indexOf(bgroup(b)) || (SEVN[b.severity] || 0) - (SEVN[a.severity] || 0)
+    || (b.confirmers || []).length - (a.confirmers || []).length || String(a.title).localeCompare(String(b.title)));
+  let h = `<div class="filters bugbar">${BG.map(([k, l]) => `<button class="chip ${BF.g === k ? "on" : ""}" data-bg="${k}">${l}${k ? ` · ${n(k)}` : ""}</button>`).join("")}
+    <select id="bugwho"><option value="">Everyone</option>${who.map(a => `<option value="${esc(a)}" ${BF.who === a ? "selected" : ""}>${esc(name(a))}</option>`).join("")}</select>
+    <span class="count">${hit.length} shown</span></div>`;
+  if (!hit.length) return h + `<div class="empty">${all.length ? "No bug matches these filters." : "No bugs yet. They show up here as the characters report them."}</div>`;
+  let last = null;
+  for (const b of hit) { const g = bgroup(b); if (!BF.g && g !== last) { h += `<div class="gcat">${BGTEXT[g]} · ${n(g)}</div>`; last = g } h += bugRow(b) }
   return h;
 }
 
@@ -573,12 +812,16 @@ function go(id) { location.hash = id }
 function render() {
   const sel = decodeURIComponent(location.hash.slice(1)) || "square";
   shown = [];
+  visitBugs(sel === "bugs");
   const v = document.getElementById("view");
   const open = new Set([...v.querySelectorAll("details[data-id]")].map(d => d.dataset.id + ":" + d.open));
   document.getElementById("brand").textContent = D.title;
   const now = stepNow();
   document.getElementById("steps").innerHTML = STEPS.map(([k, l], i) => `<span class="step ${i < now ? "past" : i === now ? "now" : ""}">${l}</span>`).join(`<span class="sep">›</span>`);
   document.getElementById("channels").innerHTML = channels(sel);
+  const opt = (k, l) => `<option value="${esc(k)}" ${sel === k ? "selected" : ""}>${esc(l)}</option>`;
+  document.getElementById("chpick").innerHTML = opt("square", "# town-square") + opt("bugs", "# bugs") + opt("notices", "# notices") +
+    (D.epoch ? opt("before", "# before-outage") : "") + D.people.map(p => opt(p.id, "@ " + p.name)).join("");
   document.getElementById("members").innerHTML = members();
   document.getElementById("banner").innerHTML = D.stack_down ? `<div class="down">⚠ Test servers down: ${esc(D.stack_down)}. Testers are holding.</div>` : "";
   const running = D.people.filter(p => p.status === "running").length;
@@ -586,6 +829,7 @@ function render() {
   const stats = `<div class="stats"><span>🟢 ${running} testing</span><span>🐞 ${bugs} today</span><span>💬 ${D.feed.length} posts</span><span title="${esc(D.quota)}">⏱ ${esc(D.generated)}</span></div>`;
   let title = "town-square", desc = "Every character's posts, newest first. Replies are threads.", body = "";
   if (sel === "square") body = square();
+  else if (sel === "bugs") { title = "bugs"; desc = "Every bug the crowd found, from the first report to the fix. Updates live."; body = board() }
   else if (sel === "notices") { title = "notices"; desc = "From the organisers"; body = posts.filter(e => e.author === "organiser").slice().reverse().map(msg).join("") || `<div class="empty">No notices.</div>` }
   else if (sel === "before") { title = "before-outage"; desc = "Posts from before " + D.epoch.slice(11, 16) + ": that world was wiped"; body = posts.filter(isOld).slice().reverse().map(msg).join("") }
   else if (P[sel]) { const p = P[sel]; title = p.name; desc = `${p.role}${p.age_city ? " · " + p.age_city : ""}`; body = person(p) }
@@ -600,9 +844,12 @@ function render() {
 }
 
 document.addEventListener("click", ev => {
-  const el = ev.target.closest("[data-go],[data-kind],img.shot,#zoom .nav,#zoom");
+  const el = ev.target.closest("[data-go],[data-kind],[data-bg],[data-bugs],.shotlink,img.shot,#zoom .nav,#zoom");
   if (!el) return;
   if (el.dataset.go) go(el.dataset.go);
+  else if (el.dataset.bg !== undefined) { BF.g = el.dataset.bg; saveBF() }
+  else if (el.dataset.bugs !== undefined) { BF.g = ""; BF.who = el.dataset.bugs; sessionStorage.setItem("bugfilters", JSON.stringify(BF)) }
+  else if (el.matches(".shotlink")) zoom(+el.dataset.i);
   else if (el.dataset.kind !== undefined && el.classList.contains("chip")) { F.kind = el.dataset.kind; saveF() }
   else if (el.matches("img.shot")) zoom(+el.dataset.i);
   else if (el.matches("#zoom .nav")) { ev.stopPropagation(); zoom(zi + (el.classList.contains("next") ? 1 : -1)) }
@@ -611,12 +858,15 @@ document.addEventListener("click", ev => {
 document.addEventListener("change", ev => {
   if (ev.target.id === "who") { F.who = ev.target.value; saveF() }
   if (ev.target.id === "hasshot") { F.shot = ev.target.checked; saveF() }
+  if (ev.target.id === "bugwho") { BF.who = ev.target.value; saveBF() }
+  if (ev.target.id === "chpick") go(ev.target.value);
 });
 document.addEventListener("keydown", ev => {
   if (zi < 0) return;
   if (ev.key === "Escape") unzoom(); else if (ev.key === "ArrowRight") zoom(zi + 1); else if (ev.key === "ArrowLeft") zoom(zi - 1);
 });
 function saveF() { sessionStorage.setItem("filters", JSON.stringify(F)); render() }
+function saveBF() { sessionStorage.setItem("bugfilters", JSON.stringify(BF)); render() }
 
 // live: pull square-data.js (a plain script, so it also works from file://) and patch the page in place
 function poll() {
@@ -653,14 +903,17 @@ def put(path, text):
 
 def write(run, embed):
     data = collect(run, embed)
-    state = world_state(run, data)
+    state = world_state(run, data, embed)
     color = {c["id"]: c["color"] for c in state["characters"]}
     for p in data["people"]:
         p["color"] = color[p["id"]]
     data["stage"] = state["run"]["stage"]
+    data["bugs"] = state["bugs"]   # the #bugs channel
+    if embed:   # only the square shows a bug's screenshots; keep the inlined images out of the world's copies
+        state = {**state, "bugs": [{**b, "shot": "", "fix": {**b["fix"], "shot": ""} if b.get("fix") else {}} for b in state["bugs"]]}
     sq = f"{run}/square"
     os.makedirs(sq, exist_ok=True)
-    blob = lambda x: json.dumps(x).replace("</", "<\\/")
+    blob = lambda x: json.dumps(x).replace("<", "\\u003c")   # nothing a tester wrote can open a tag or a comment
     put(f"{sq}/state.json", json.dumps(state, indent=1))
     put(f"{sq}/state.js", "window.CROWD_STATE = " + blob(state) + ";\n")
     put(f"{sq}/square-data.js", "window.SQUARE_DATA = " + blob(data) + ";\n")
