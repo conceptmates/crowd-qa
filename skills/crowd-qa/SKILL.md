@@ -137,7 +137,10 @@ and their houses, and in the fix stage between the workshop, the review booth, t
 (one boat per PR, tagged with its area's live stage), the watchtower (fix-watch.py's lookout) and the bank
 (each engine's usage limit per account and what the run spent; when an engine is paused at its limit, everyone on
 it sleeps). Click anyone for their card; job cards link to their T3 thread. `square.html` is the
-Discord-style square of every post and reply, with filters; both read `square/state.json`. `restart-watchers.sh`
+Discord-style square of every post and reply, with filters, and its `#bugs` channel (the town's Bugs button, or
+`B`) is every bug in one place: from the first report through the judge, filing, fix, review and re-test to the PR,
+with dropped ones and why (a not-needed one shows the `rescue` command that files it anyway); bugs that moved since
+you last looked are marked. Both read `square/state.json`. `restart-watchers.sh`
 also serves them (`square-serve.py`, only the pages and screenshots, never config or state) on this machine's
 Tailscale address and prints the URL; `crowd.py status` repeats it. Give the user that URL at launch.
 

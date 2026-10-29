@@ -6,8 +6,10 @@ Each test builds a small run dir, runs the real scripts, and checks one behaviou
   python3 tests/test_crowd.py -k quota   # by name
 """
 import glob
+import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -1094,7 +1096,8 @@ class SquareView(unittest.TestCase):
     SHAPE = {"run": {"name", "date", "days", "stage", "updated"},
              "characters": {"id", "name", "role", "surface", "status", "day", "done", "total", "bugs", "color", "shot", "engine"},
              "posts": {"id", "author", "kind", "text", "ts", "parent", "shot"},
-             "bugs": {"key", "title", "severity", "reporter", "confirmers", "state", "url", "area"},
+             "bugs": {"key", "title", "severity", "reporter", "confirmers", "state", "url", "area", "type", "day", "cant_repro",
+                      "shot", "why", "rescued", "fix", "pr", "plan", "impact"},
              "jobs": {"id", "role", "area", "status", "runner", "model", "thread", "persona", "started"},
              "bouts": {"id", "kind", "a", "b", "subject", "rounds", "winner", "scores", "status"},
              "prs": {"area", "url", "number", "status", "stage", "bugs", "recheck"},
@@ -1214,6 +1217,128 @@ class SquareView(unittest.TestCase):
         self.assertEqual([st[k] for k in ("posts", "bugs", "jobs", "bouts", "prs")], [[], [], [], [], []])
         self.assertEqual(st["characters"][0]["status"], "waiting")
         self.assertTrue(os.path.exists(r.path("square", "square.html")))
+
+    def put(self, r, rel, obj):
+        os.makedirs(os.path.dirname(r.path(*rel.split("/"))), exist_ok=True)
+        with open(r.path(*rel.split("/")), "w") as f:
+            f.write(obj if isinstance(obj, str) else json.dumps(obj))
+
+    def test_bug_board_has_every_bug_and_where_it_is(self):
+        """#bugs: verified, found today, not worth an issue, not a bug; then filed, refused, fixed, re-tested, in a PR."""
+        r = Run("squareview-bugs", lanes("ana", "maya", "leo"), config="DAYS=2")
+        put = lambda rel, obj: self.put(r, rel, obj)
+        shot = r.path("lanes", "ana", "round1", "shots", "S2.png")
+        put("lanes/ana/round1/shots/S2.png", "png")
+        put("lanes/ana/round1/report.json", {"scenarios": [{"id": "S1", "status": "fail"}],
+                                             "findings": [{"id": "F3", "title": "Login fails", "severity": "high",
+                                                           "screenshots": ["shots/S2.png"]}]})
+        put("lanes/ana/round1/DONE", "exit=0\n")
+        put("lanes/ana/round1/verdict.json", {
+            "verified_findings": [{"title": "Pay button double charges", "severity": "high", "type": "bug", "screenshots": [shot],
+                                   "impact": "buyers are charged twice",
+                                   "confirmers": [{"id": "leo"}, {"id": "S4"}],
+                                   "cant_repro": ["Maya could not reproduce it on Android", "nobody"]}],
+            "not_needed": [{"title": "Footer link is a shade off", "severity": "low", "why_not": "cosmetic", "by": "judge"},
+                           {"title": "Typo in the help page", "severity": "low", "why_not": "low severity", "by": "code"}],
+            "rejected": [{"id": "F3", "title": "Login fails", "reason": "the stack was down", "by": "judge"}]})
+        put("lanes/maya/round1/report.json", {"scenarios": [{"id": "S1", "status": "pass"}],
+                                              "findings": [{"title": "Search ignores accents", "severity": "medium", "type": "bug"}]})
+        pay, nn, typo, login, search = (hashlib.sha1(t.encode()).hexdigest()[:12] for t in (
+            "Pay button double charges", "Footer link is a shade off", "Typo in the help page", "Login fails", "Search ignores accents"))
+
+        bugs = {b["key"]: b for b in self.render(r)["bugs"]}
+        self.assertEqual({k: bugs[k]["state"] for k in bugs},
+                         {pay: "verified", nn: "not-needed", typo: "not-needed", login: "rejected", search: "found"})
+        self.assertEqual((bugs[pay]["confirmers"], bugs[pay]["cant_repro"], bugs[pay]["day"]), (["leo"], ["maya"], 1))
+        self.assertEqual(bugs[pay]["impact"], "buyers are charged twice")
+        self.assertEqual(bugs[pay]["shot"], "../lanes/ana/round1/shots/S2.png")
+        self.assertEqual(bugs[nn]["why"], "cosmetic")
+        self.assertIn("severity bar", bugs[typo]["why"], "a finding the code gate dropped says so")
+        self.assertEqual((bugs[login]["why"], bugs[login]["severity"]), ("the stack was down", "high"),
+                         "a rejected finding keeps the tester's own severity")
+        self.assertEqual(bugs[login]["shot"], "../lanes/ana/round1/shots/S2.png", "the tester's path is relative to its round")
+        self.assertEqual(bugs[search]["reporter"], "maya")
+        st = json.load(open(r.path("square", "state.json")))
+        self.assertEqual({c["id"]: c["bugs"] for c in st["characters"]}, {"ana": 1, "maya": 1, "leo": 0},
+                         "not-needed and rejected findings are not counted as a character's bugs")
+
+        put("state/issues.json", [{"key": pay, "title": "Pay button double charges", "severity": "high", "reporter": "ana",
+                                   "confirmers": [{"id": "leo"}], "day": 1, "screenshots": [shot]},
+                                  {"key": "k2", "title": "Avatar upload spins", "severity": "low", "reporter": "maya"},
+                                  {"key": "k3", "title": "Cart badge lags", "severity": "medium", "reporter": "leo", "rescued": True},
+                                  {"key": "k7", "title": "Shipping date is <!-- yesterday <script>x</script>", "severity": "low",
+                                   "reporter": "maya"},
+                                  {"key": "k8", "title": "Tax line rounds down", "severity": "medium", "reporter": "ana"},
+                                  {"key": "k10", "title": "Coupon field eats spaces", "severity": "low", "reporter": "leo"}])
+        put("state/filed.json", {pay: {"url": "https://github.com/o/a/issues/1", "title": "Pay button double charges"},
+                                 "k3": {"url": "https://github.com/o/a/issues/3", "title": "Cart badge lags"},
+                                 "k8": {"url": "https://github.com/o/a/issues/8", "title": "Tax line rounds down"},
+                                 "k10": {"url": "https://github.com/o/a/issues/10", "title": "Coupon field eats spaces"}})
+        put("state/file-plan.json", {"k7": {"action": "comment", "target": 7}})
+        put("state/refused.json", {"k2": {"title": "Avatar upload spins", "reason": "not needed: the spinner clears in a second",
+                                          "not_needed": True, "bug": {"title": "Avatar upload spins", "reporter": "maya"}},
+                                   "k9": {"title": "Old banner", "reason": "duplicate of #2",
+                                          "bug": {"title": "Old banner", "reporter": "leo", "severity": "low"}}})
+        parent = os.path.join(WORK, "squareview-bugs-parent")   # a make-up run fixes its parent's bugs too
+        shutil.rmtree(parent, ignore_errors=True)
+        os.makedirs(os.path.join(parent, "state"))
+        json.dump({"pk1": {"url": "https://github.com/o/a/issues/2", "title": "Parent run: search is slow", "reporter": "leo",
+                           "severity": "high"}}, open(os.path.join(parent, "state", "filed.json"), "w"))
+        with open(r.path("config.env"), "a") as f:
+            f.write(f'FIX_FROM_RUNS="{parent}"\n')
+        put("state/areas.json", {"payments": [pay], "cart": ["k3", "pk1"], "tax": ["k8"], "coupons": ["k10"]})
+        put("state/areas-detail.json", {
+            "payments": {"bugs": [pay], "status": "fixing", "attempt": 2, "verdicts": {pay: "FAIL"},
+                         "recheck": {pay: {"key": pay, "persona": "ana", "verdict": "FAIL", "note": "still charges twice",
+                                           "shot": "https://img.example/1.png",
+                                           "comment": "https://github.com/o/a/issues/1#issuecomment-2"}}},
+            "cart": {"bugs": ["k3", "pk1"], "status": "done", "attempt": 1, "verdicts": {"k3": "PASS", "pk1": "PASS"},
+                     "pr": "https://github.com/o/a/pull/9"},
+            "tax": {"bugs": ["k8"], "status": "reviewing", "attempt": 1, "verdicts": {}, "pr": "https://github.com/o/a/pull/11"},
+            "coupons": {"bugs": ["k10"], "status": "needs-human", "attempt": 1, "verdicts": {"k10": "PASS"}, "pr": "",
+                        "unresolved": [{"severity": "blocker", "text": "drops the trailing space only"}]}})
+        put("state/prs.json", {"cart": {"url": "https://github.com/o/a/pull/9", "number": 9, "status": "done", "bugs": ["k3", "pk1"]},
+                               "coupons": {"url": "", "number": None, "status": "needs-human", "bugs": ["k10"]}})
+        bugs = {b["key"]: b for b in self.render(r)["bugs"]}
+        self.assertEqual(bugs[pay]["state"], "filed")
+        self.assertEqual(bugs[pay]["fix"], {"status": "fixing", "attempt": 2, "verdict": "FAIL", "note": "still charges twice",
+                                            "by": "ana", "shot": "https://img.example/1.png",
+                                            "comment": "https://github.com/o/a/issues/1#issuecomment-2", "failed": "",
+                                            "unresolved": False})
+        self.assertEqual(bugs[pay]["pr"], {})
+        self.assertEqual((bugs["k3"]["state"], bugs["k3"]["fix"]["verdict"], bugs["k3"]["rescued"]), ("in-pr", "PASS", True))
+        self.assertEqual(bugs["k3"]["pr"], {"url": "https://github.com/o/a/pull/9", "number": 9, "status": "draft"},
+                         "an area status in prs.json reads as a draft PR, as the harbour shows it")
+        self.assertEqual((bugs["k2"]["state"], bugs["k2"]["why"]), ("not-needed", "the spinner clears in a second"),
+                         "the check before filing can still call a bug not needed")
+        self.assertEqual((bugs["k9"]["state"], bugs["k9"]["why"], bugs["k9"]["reporter"]), ("refused", "duplicate of #2", "leo"))
+        self.assertEqual(bugs[nn]["state"], "not-needed", "the day's not-needed findings stay on the board after dedupe")
+        self.assertEqual(bugs[login]["state"], "rejected")
+        self.assertNotIn(search, bugs, "after dedupe the board follows issues.json")
+        self.assertEqual((bugs["k7"]["state"], bugs["k7"]["plan"], bugs["k7"]["url"]), ("planned", "to comment on #7", ""))
+        self.assertEqual((bugs["k8"]["state"], bugs["k8"]["pr"]), ("filed", {"url": "https://github.com/o/a/pull/11", "number": 11,
+                                                                              "status": "draft"}), "the fixer's draft PR shows at once")
+        self.assertEqual((bugs["k10"]["state"], bugs["k10"]["pr"], bugs["k10"]["fix"]["unresolved"]), ("filed", {}, True),
+                         "an area finalized without a PR is not 'in a PR'")
+        self.assertEqual((bugs["pk1"]["state"], bugs["pk1"]["title"], bugs["pk1"]["reporter"], bugs["pk1"]["fix"]["verdict"]),
+                         ("in-pr", "Parent run: search is slow", "leo", "PASS"), "a parent run's bug this run fixes is on the board")
+        data = r.read("square", "square-data.js")
+        self.assertIn('"bugs": [', data, "the 2D page gets the board in the data it polls")
+        for f in ("square.html", "index.html", "square-data.js", "state.js"):
+            self.assertNotIn("<!-- yesterday", r.read("square", f), f"{f}: a tester's text cannot open a comment or a tag")
+        self.assertIn("still charges twice", data)
+        put("state/issues.json", [])
+        bugs = {b["key"]: b for b in self.render(r)["bugs"]}
+        self.assertNotIn(pay, [k for k, b in bugs.items() if b["state"] == "verified"],
+                         "an empty issues.json means dedupe left nothing to file, not 'before dedupe'")
+        page = r.read("square", "square.html")
+        self.assertIn('ch("bugs", "bugs"', page)
+        script = re.search(r"<script>(.*)</script>", page, re.S).group(1)
+        js = os.path.join(r.dir, "square-page.js")
+        open(js, "w").write(script)
+        if shutil.which("node"):
+            res = subprocess.run(["node", "--check", js], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
 
 
 if __name__ == "__main__":
