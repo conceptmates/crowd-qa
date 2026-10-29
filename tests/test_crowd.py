@@ -1097,7 +1097,7 @@ class SquareView(unittest.TestCase):
              "characters": {"id", "name", "role", "surface", "status", "day", "done", "total", "bugs", "color", "shot", "engine"},
              "posts": {"id", "author", "kind", "text", "ts", "parent", "shot"},
              "bugs": {"key", "title", "severity", "reporter", "confirmers", "state", "url", "area", "type", "day", "cant_repro",
-                      "shot", "why", "rescued", "fix", "pr", "plan"},
+                      "shot", "why", "rescued", "fix", "pr", "plan", "impact"},
              "jobs": {"id", "role", "area", "status", "runner", "model", "thread", "persona", "started"},
              "bouts": {"id", "kind", "a", "b", "subject", "rounds", "winner", "scores", "status"},
              "prs": {"area", "url", "number", "status", "stage", "bugs", "recheck"},
@@ -1235,6 +1235,7 @@ class SquareView(unittest.TestCase):
         put("lanes/ana/round1/DONE", "exit=0\n")
         put("lanes/ana/round1/verdict.json", {
             "verified_findings": [{"title": "Pay button double charges", "severity": "high", "type": "bug", "screenshots": [shot],
+                                   "impact": "buyers are charged twice",
                                    "confirmers": [{"id": "leo"}, {"id": "S4"}],
                                    "cant_repro": ["Maya could not reproduce it on Android", "nobody"]}],
             "not_needed": [{"title": "Footer link is a shade off", "severity": "low", "why_not": "cosmetic", "by": "judge"},
@@ -1249,6 +1250,7 @@ class SquareView(unittest.TestCase):
         self.assertEqual({k: bugs[k]["state"] for k in bugs},
                          {pay: "verified", nn: "not-needed", typo: "not-needed", login: "rejected", search: "found"})
         self.assertEqual((bugs[pay]["confirmers"], bugs[pay]["cant_repro"], bugs[pay]["day"]), (["leo"], ["maya"], 1))
+        self.assertEqual(bugs[pay]["impact"], "buyers are charged twice")
         self.assertEqual(bugs[pay]["shot"], "../lanes/ana/round1/shots/S2.png")
         self.assertEqual(bugs[nn]["why"], "cosmetic")
         self.assertIn("severity bar", bugs[typo]["why"], "a finding the code gate dropped says so")

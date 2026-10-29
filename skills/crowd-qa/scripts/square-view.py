@@ -234,7 +234,8 @@ def bug_list(run, people, filed, areas, prs, embed=False):
         b = {"key": k, "title": f.get("title", ""), "severity": f.get("severity", ""), "reporter": reporter,
              "confirmers": characters_in(f.get("confirmers"), ids, reporter, names), "state": state,
              "type": f.get("type", ""), "day": f.get("day", ""), "cant_repro": characters_in(f.get("cant_repro"), ids, reporter, names),
-             "shot": shot_of(f.get("screenshots"), run, embed), "why": why, "rescued": bool(f.get("rescued"))}
+             "shot": shot_of(f.get("screenshots"), run, embed), "why": why, "rescued": bool(f.get("rescued")),
+             "impact": f.get("impact", "")}   # the judge's sentence on why it matters
         bugs[k] = b
         return b
 
@@ -773,7 +774,7 @@ function bugRow(b) {
     (b.state === "not-needed" ? `<div class="why">To file it anyway: <code class="cmd" title="Select and copy">python3 "$RUN/scripts/crowd.py" "$RUN" rescue ${esc(shq(b.title))}</code></div>` : "") : "";
   return `<div class="bug g-${g}${bugFresh.has(b.key) ? " is-fresh" : ""}" id="bug-${esc(b.key)}"><div class="hd">${bugFresh.has(b.key) ? `<span class="fresh">updated</span>` : ""}
     ${b.severity ? `<span class="sev sev-${esc(b.severity)}">${esc(b.severity)}</span>` : ""}<b>${esc(b.title)}</b><span class="links">${links}</span></div>
-    <div class="meta">${meta}</div>${bpath(b)}${rc}${why}</div>`;
+    <div class="meta">${meta}</div>${b.impact && g !== "out" ? `<div class="why">Why it matters: ${esc(b.impact)}</div>` : ""}${bpath(b)}${rc}${why}</div>`;
 }
 function board() {
   const all = D.bugs || [], mine = b => !BF.who || b.reporter === BF.who;
